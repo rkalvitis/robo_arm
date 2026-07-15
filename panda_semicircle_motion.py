@@ -9,10 +9,11 @@ The script:
 1. reads an initial joint configuration from a CSV file;
 2. moves the robot to the initial configuration;
 3. reads the Cartesian pose that was reached;
-4. places the object (sphere center) at distance 'radius' in +Y
-   from that pose, at the same height;
+4. places the object (sphere center) at distance 'radius' straight
+   BELOW that pose - the camera starts looking down at it;
 5. generates waypoints along an arc in the Y-Z plane, centered on
-   the object, so the camera-object distance stays constant;
+   the object, descending from above toward the +Y side, so the
+   camera-object distance stays constant;
 6. rotates the end-effector at each waypoint so the camera keeps
    aiming at the object;
 7. adds the object's sphere to the planning scene as a keep-out
@@ -78,6 +79,11 @@ OBJECT_RADIUS_RATIO = 0.5
 
 KEEPOUT_OBJECT_NAME = "object_keepout"
 
+# The object sits on a thin vertical rod (2 mm radius) reaching up
+# from the ground. Modeled with a safety margin; 0 disables it.
+ROD_OBJECT_NAME = "support_rod"
+SUPPORT_ROD_RADIUS = 0.005
+
 # Links allowed to touch the keep-out sphere. The hand carries the
 # camera and must get within 'radius' of the object, so it cannot be
 # collision-checked against the sphere; the rest of the arm still is.
@@ -120,12 +126,14 @@ def load_joint_position(file_path):
 
 def compute_sphere_center(start_pose, radius):
     """
-    The object (sphere center) sits at distance 'radius' in +Y from
-    the starting camera position, at the same height.
+    The object (sphere center) sits at distance 'radius' straight
+    BELOW the starting camera position: the camera starts looking
+    down at it, and the support rod continues below it to the
+    ground.
     """
 
     center = copy.deepcopy(start_pose.position)
-    center.y = start_pose.position.y + radius
+    center.z = start_pose.position.z - radius
 
     return center
 
@@ -158,18 +166,22 @@ def create_arc_waypoints(
         number_of_points,
         track_object):
     """
-    Generates an arc in the Y-Z plane, centered on the object.
+    Generates an arc in the Y-Z plane, centered on the object,
+    which sits at distance 'radius' straight below the start pose.
 
     +Y = right
     +Z = up
 
-    The trajectory starts from the current pose and initially moves
-    mostly toward +Z. Afterwards it also moves toward +Y.
+    The camera starts at the top of the sphere looking straight
+    down at the object, then sweeps toward +Y, descending along the
+    sphere. At theta = 90 degrees it looks at the object
+    horizontally from the side; beyond that it goes below the
+    object's height, toward the support rod and the ground.
 
-    Formula:
+    Formula (deltas from the start pose):
 
-        delta_y = r * (1 - cos(theta))
-        delta_z = r * sin(theta)
+        delta_y = r * sin(theta)
+        delta_z = r * (cos(theta) - 1)
 
     theta ranges from 0 to arc_degrees.
 
@@ -201,8 +213,8 @@ def create_arc_waypoints(
 
         theta = total_angle * float(index) / float(number_of_points)
 
-        delta_y = radius * (1.0 - math.cos(theta))
-        delta_z = radius * math.sin(theta)
+        delta_y = radius * math.sin(theta)
+        delta_z = radius * (math.cos(theta) - 1.0)
 
         waypoint = copy.deepcopy(start_pose)
 
@@ -270,6 +282,51 @@ def add_object_keepout(scene, move_group, center, object_radius):
         center.y,
         center.z,
         object_radius
+    )
+
+
+def add_support_rod(scene, move_group, center, rod_radius):
+    """
+    Adds the object's support rod - a thin vertical cylinder from
+    the ground (z = 0 in the planning frame) up to the object - as a
+    collision object. Unlike the keep-out sphere, NO link is exempt
+    from it: nothing on the robot may ever touch the rod.
+    """
+
+    rod_pose = PoseStamped()
+    rod_pose.header.frame_id = move_group.get_planning_frame()
+    rod_pose.pose.position.x = center.x
+    rod_pose.pose.position.y = center.y
+    rod_pose.pose.position.z = center.z / 2.0
+    rod_pose.pose.orientation.w = 1.0
+
+    scene.remove_world_object(ROD_OBJECT_NAME)
+    rospy.sleep(0.5)
+
+    try:
+        scene.add_cylinder(
+            ROD_OBJECT_NAME,
+            rod_pose,
+            center.z,
+            rod_radius
+        )
+    except AttributeError:
+        # Older moveit_commander versions have no add_cylinder.
+        scene.add_box(
+            ROD_OBJECT_NAME,
+            rod_pose,
+            (2.0 * rod_radius, 2.0 * rod_radius, center.z)
+        )
+
+    rospy.sleep(1.0)
+
+    rospy.loginfo(
+        "Support rod added: x=%.6f, y=%.6f, from the ground to "
+        "z=%.6f - radius %.4f m (no link is exempt from it)",
+        center.x,
+        center.y,
+        center.z,
+        rod_radius
     )
 
 
@@ -732,6 +789,11 @@ def main():
         if link.strip()
     ]
 
+    rod_radius = rospy.get_param(
+        "~rod_radius",
+        SUPPORT_ROD_RADIUS
+    )
+
     rospy.loginfo("Joint file: %s", joint_file)
     rospy.loginfo("Execution enabled: %s", execute_motion)
     rospy.loginfo("Radius: %.4f m", radius)
@@ -743,9 +805,22 @@ def main():
         object_radius
     )
     rospy.loginfo(
+        "Support rod radius: %.4f m (0 = disabled)",
+        rod_radius
+    )
+    rospy.loginfo(
         "Wait between waypoints: %.2f seconds",
         wait_between_points
     )
+
+    if arc_degrees > 90.0:
+        rospy.logwarn(
+            "Arc of %.1f degrees goes below the object's height: "
+            "the hand will work close to the support rod on the "
+            "final waypoints (intended for bottom views - MoveIt "
+            "will reject any waypoint that would touch the rod).",
+            arc_degrees
+        )
 
     if object_radius >= radius:
         rospy.logerr(
@@ -883,6 +958,18 @@ def main():
         sphere_center.z,
         radius
     )
+
+    if rod_radius > 0.0:
+        add_support_rod(
+            scene,
+            move_group,
+            sphere_center,
+            rod_radius
+        )
+    else:
+        rospy.logwarn(
+            "Support rod disabled (_rod_radius <= 0)."
+        )
 
     if object_radius > 0.0:
         add_object_keepout(

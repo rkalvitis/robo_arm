@@ -10,24 +10,40 @@ distance**:
 - The object sits at a fixed spot — the **center of an imaginary sphere** of manually chosen
   radius `r`.
 - A **phone is mounted on the end-effector** and acts as the camera.
-- The robot moves the camera along a **vertical arc in the Y-Z plane**, centered on the object.
-  As the camera rises in Z, it shifts along Y so the camera-object distance always stays
-  exactly `r`.
-- **During development the arc is 60°** (matches the current script and keeps wrist rotation /
-  reachability easy). The eventual target is a full **180°** sweep — from the object's height on
-  one side, over the top, down to the object's height on the far side.
+- The camera **starts directly above the object, looking straight down** at it, and moves
+  along a **vertical arc in the Y-Z plane** centered on the object: it sweeps toward +Y,
+  descending along the sphere while the camera-object distance stays exactly `r`, and
+  **continues past the side view (90°) to underneath the object** (~170°, looking up at it).
+- Bottom views are the whole point of the wire-thin support rod: the object hangs on a 2 mm
+  rod so the camera can photograph it from below. On the final waypoints the hand works
+  close to the rod (at 170° the camera is ~`r·sin(10°)` ≈ 1.7 cm off the rod axis for
+  r = 10 cm) — the rod collision cylinder makes MoveIt reject anything that would touch it.
 - The arc has **9 photo poses**, evenly spaced. The robot stops at each one; a photo is taken
   while stationary.
 - The **camera must aim at the object at every pose** (end-effector orientation rotates along
   the arc so the object stays centered in frame).
 - The sphere center is defined from the **start pose + the given radius**: the object is placed
-  at distance `r` in +Y from the starting camera position, at the same height.
+  at distance `r` **straight below** the starting camera position (the hand's start is the
+  highest point of the whole trajectory).
 - **Safety constraint:** no part of the arm may ever enter the object's sphere (add it as a
   keep-out collision object in MoveIt).
+- **Support rod:** the object is held by a thin vertical rod (2 mm radius) reaching from the
+  ground up to the object. The arm must never touch it — modeled as a vertical collision
+  cylinder (`_rod_radius`, default 5 mm = rod + margin, no link exempt).
 
 ## Current implementation status
 
-All development-phase features are **implemented** (2026-07-15), pending test on the robot:
+All development-phase features are **implemented and verified in demo-mode simulation**
+(2026-07-15: full run, 90° arc, r=0.05 m, 12 waypoints — all reached; logged positions match
+the planned arc to <1 mm and the final orientation matches the expected 90° rotation exactly).
+Not yet run on the real robot.
+
+**Next step before real-object runs — camera offset:** the radius is currently measured from
+the flange, so the sphere center at 3–5 cm sits *inside the gripper envelope* (that's why the
+wrist link needed a keep-out exemption). Once the phone is mounted, measure flange→lens
+distance and add a `_camera_offset` param: sphere center goes at `offset + radius` from the
+flange, keeping the *lens* at the desired distance. Until then, do not place a real object at
+the sphere position shown in RViz.
 
 | | Status |
 |---|---|
@@ -57,11 +73,13 @@ OMPL planning / Franka controller goal tolerances fail. Fix in `move_to_pose`:
 1. Reads a **7-joint start configuration** from a CSV file (`joint_start.csv`).
 2. Moves the arm to that joint configuration and waits 2 s.
 3. Reads the Cartesian pose actually reached — this becomes the arc origin, and the
-   **object (sphere center) is placed at distance `r` in +Y** from it, at the same height.
-4. Adds the **keep-out sphere** at the center (unless `_object_radius:=0`).
+   **object (sphere center) is placed at distance `r` straight below it** (camera starts
+   looking down at the object; the start is the highest point of the trajectory).
+4. Adds the **support rod** collision cylinder (ground → object) and the **keep-out sphere**
+   at the center (unless disabled via `_rod_radius:=0` / `_object_radius:=0`).
 5. Generates **9 waypoints** along a **60° arc of radius `r`** in the **Y-Z plane**:
-   - `delta_y = r * (1 - cos θ)`, `delta_z = r * sin θ` — constant distance `r` from the object
-   - motion starts mostly **upward (+Z)** and curves toward **+Y (right)**
+   - `delta_y = r * sin θ`, `delta_z = r * (cos θ − 1)` — constant distance `r` from the object
+   - motion **descends from the top** of the sphere toward **+Y (right)**; 90° = side view
    - **X stays constant**; orientation rotates by −θ about X so the camera keeps aiming at
      the object (frozen instead if `_track_object:=false`)
 6. Moves to each waypoint one by one (straight-line Cartesian segment, re-timed to 5 % speed,
