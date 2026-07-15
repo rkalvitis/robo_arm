@@ -34,7 +34,7 @@ All development-phase features are **implemented** (2026-07-15), pending test on
 | Arc sweep | 60° (development value; 180° eventually) |
 | Waypoints | default 9 |
 | Camera orientation | rotates by −θ about X at each waypoint so the camera always aims at the object (`_track_object`, default `true`); math verified numerically — constant distance, ~0 aim error |
-| Object sphere keep-out | sphere collision object added to the MoveIt planning scene at the computed center (`_object_radius`, default half the arc radius, `0` disables; must be < arc radius). Hand links (`_keepout_ignored_links`) are exempted in the Allowed Collision Matrix — without this the hand, which must get within `radius` of the object, is permanently "in collision" and **all planning fails** (confirmed in demo-mode test 2026-07-15: Cartesian 0 % feasible + OMPL TIMED_OUT at waypoint 1) |
+| Object sphere keep-out | sphere collision object added to the MoveIt planning scene at the computed center (`_object_radius`, default half the arc radius, `0` disables; must be < arc radius). Hand links (`_keepout_ignored_links`, incl. the coarse `*_sc` capsule bodies of newer panda_moveit_config) are exempted in the Allowed Collision Matrix — without this the hand, which must get within `radius` of the object, is permanently "in collision" and **all planning fails** (confirmed in demo-mode tests 2026-07-15: Cartesian 0 % feasible + OMPL TIMED_OUT at waypoint 1; exempting only the visible hand links was not enough — the `panda_hand_sc` capsule was the remaining contact). After adding the sphere the script now calls `/check_state_validity`, logs the exact contact pairs, and auto-exempts any link still touching the sphere |
 
 ### Motion-reliability fix (robot stopped after waypoint 1)
 

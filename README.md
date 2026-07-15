@@ -62,7 +62,7 @@ All are private ROS params (`_name:=value`):
 | `_wait_between_points` | `2.0` (s) | Pause at each waypoint |
 | `_track_object` | `true` | Rotate the camera along the arc so it always aims at the object; `false` = keep orientation frozen |
 | `_object_radius` | `0.5 × _radius` (m) | Radius of the keep-out collision sphere around the object. **A value in meters** (the 0.5 is a ratio, only used for the default). `0` disables it; must be smaller than `_radius` |
-| `_keepout_ignored_links` | `panda_link8,panda_hand,panda_leftfinger,panda_rightfinger` | Links allowed to touch the keep-out sphere (the hand carries the camera and must get that close); the rest of the arm is still kept out |
+| `_keepout_ignored_links` | hand + finger links incl. `*_sc` capsule variants | Links allowed to touch the keep-out sphere (the hand carries the camera and must get that close); the rest of the arm is still kept out. The script also auto-detects and exempts (with a warning) any link still in contact with the sphere at the start pose |
 
 Example with custom arc:
 

@@ -41,7 +41,7 @@ from moveit_msgs.msg import (
     PlanningScene,
     PlanningSceneComponents
 )
-from moveit_msgs.srv import GetPlanningScene
+from moveit_msgs.srv import GetPlanningScene, GetStateValidity
 from tf.transformations import quaternion_about_axis, quaternion_multiply
 
 
@@ -81,8 +81,11 @@ KEEPOUT_OBJECT_NAME = "object_keepout"
 # Links allowed to touch the keep-out sphere. The hand carries the
 # camera and must get within 'radius' of the object, so it cannot be
 # collision-checked against the sphere; the rest of the arm still is.
+# The *_sc links are the coarse capsule collision bodies that newer
+# panda_moveit_config versions add around the visible links.
 KEEPOUT_IGNORED_LINKS = (
-    "panda_link8,panda_hand,panda_leftfinger,panda_rightfinger"
+    "panda_link8,panda_hand,panda_leftfinger,panda_rightfinger,"
+    "panda_hand_sc,panda_link7_sc,panda_link8_sc"
 )
 
 
@@ -342,6 +345,92 @@ def allow_keepout_collisions(ignored_links):
         "Keep-out collisions allowed for links: %s",
         ", ".join(ignored_links)
     )
+
+
+def find_keepout_contacts(robot):
+    """
+    Asks move_group whether the current state is collision-free and
+    which bodies are in contact with the keep-out sphere.
+
+    Returns (valid, sphere_links, other_pairs).
+    """
+
+    rospy.wait_for_service("/check_state_validity", timeout=5.0)
+
+    check_validity = rospy.ServiceProxy(
+        "/check_state_validity",
+        GetStateValidity
+    )
+
+    response = check_validity(
+        robot_state=robot.get_current_state(),
+        group_name=PLANNING_GROUP
+    )
+
+    sphere_links = set()
+    other_pairs = []
+
+    for contact in response.contacts:
+
+        bodies = {
+            contact.contact_body_1,
+            contact.contact_body_2
+        }
+
+        if KEEPOUT_OBJECT_NAME in bodies:
+            bodies.discard(KEEPOUT_OBJECT_NAME)
+            sphere_links.update(bodies)
+        else:
+            other_pairs.append(
+                "{} <-> {}".format(
+                    contact.contact_body_1,
+                    contact.contact_body_2
+                )
+            )
+
+    return response.valid, sorted(sphere_links), other_pairs
+
+
+def ensure_state_clear_of_keepout(robot):
+    """
+    Verifies that the current state is not considered in collision
+    with the keep-out sphere. Any link still touching the sphere is
+    exempted (the camera mount has to sit this close to the object),
+    with a warning so it is always visible what was exempted.
+    """
+
+    for _ in range(3):
+
+        valid, sphere_links, other_pairs = find_keepout_contacts(
+            robot
+        )
+
+        if valid:
+            rospy.loginfo(
+                "Current state is collision-free with the "
+                "keep-out sphere in place."
+            )
+            return True
+
+        if sphere_links:
+            rospy.logwarn(
+                "Links in collision with the keep-out sphere: %s. "
+                "Exempting them from the collision check.",
+                ", ".join(sphere_links)
+            )
+
+            allow_keepout_collisions(sphere_links)
+            continue
+
+        rospy.logerr(
+            "Current state is in collision for reasons unrelated "
+            "to the keep-out sphere: %s",
+            "; ".join(other_pairs) if other_pairs else "unknown"
+        )
+        return False
+
+    valid, _, _ = find_keepout_contacts(robot)
+    return valid
 
 
 def pose_distance(pose_a, pose_b):
@@ -805,6 +894,13 @@ def main():
 
         try:
             allow_keepout_collisions(keepout_ignored_links)
+
+            if not ensure_state_clear_of_keepout(robot):
+                rospy.logerr(
+                    "The current state is still considered in "
+                    "collision - planning will fail. Use "
+                    "_object_radius:=0 to disable the sphere."
+                )
         except Exception as error:
             rospy.logerr(
                 "Unable to update the collision matrix: %s. "
