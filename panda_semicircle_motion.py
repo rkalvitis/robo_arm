@@ -9,10 +9,15 @@ The script:
 1. reads an initial joint configuration from a CSV file;
 2. moves the robot to the initial configuration;
 3. reads the Cartesian pose that was reached;
-4. generates 8 waypoints in the Y-Z plane;
-5. keeps X and orientation constant;
-6. moves first toward +Z and then toward +Y;
-7. waits 2 seconds between one waypoint and the next.
+4. places the object (sphere center) at distance 'radius' in +Y
+   from that pose, at the same height;
+5. generates waypoints along an arc in the Y-Z plane, centered on
+   the object, so the camera-object distance stays constant;
+6. rotates the end-effector at each waypoint so the camera keeps
+   aiming at the object;
+7. adds the object's sphere to the planning scene as a keep-out
+   region so no part of the arm can plan through it;
+8. waits 2 seconds between one waypoint and the next.
 
 Example joint_start.csv:
 
@@ -30,12 +35,15 @@ import numpy as np
 import rospy
 import moveit_commander
 
+from geometry_msgs.msg import PoseStamped
+from tf.transformations import quaternion_about_axis, quaternion_multiply
+
 
 PLANNING_GROUP = "panda_arm"
 
-RADIUS_METERS = 0.03
+RADIUS_METERS = 0.04
 ARC_DEGREES = 60.0
-NUMBER_OF_POINTS = 8
+NUMBER_OF_POINTS = 9
 
 WAIT_BETWEEN_POINTS = 2.0
 WAIT_AFTER_INITIAL_POSITION = 2.0
@@ -49,6 +57,20 @@ ORIENTATION_TOLERANCE = 0.02
 
 PLANNING_TIME = 10.0
 PLANNING_ATTEMPTS = 10
+
+# Cartesian segment planning between consecutive waypoints.
+CARTESIAN_EEF_STEP = 0.002
+CARTESIAN_JUMP_THRESHOLD = 5.0
+CARTESIAN_MIN_FRACTION = 0.999
+
+# If the controller reports failure but the end-effector is within
+# this distance of the target, the waypoint is considered reached.
+REACHED_DISTANCE_TOLERANCE = 0.005
+
+# Default keep-out sphere radius as a fraction of the arc radius.
+OBJECT_RADIUS_RATIO = 0.5
+
+KEEPOUT_OBJECT_NAME = "object_keepout"
 
 
 def load_joint_position(file_path):
@@ -80,13 +102,47 @@ def load_joint_position(file_path):
     return values.tolist()
 
 
+def compute_sphere_center(start_pose, radius):
+    """
+    The object (sphere center) sits at distance 'radius' in +Y from
+    the starting camera position, at the same height.
+    """
+
+    center = copy.deepcopy(start_pose.position)
+    center.y = start_pose.position.y + radius
+
+    return center
+
+
+def compute_aim_orientation(start_orientation, theta):
+    """
+    Rotates the start orientation by -theta about the world X axis.
+
+    The waypoint positions rotate by -theta about the X axis around
+    the sphere center, so applying the same rotation to the
+    orientation keeps the camera aiming at the object.
+    """
+
+    q_start = [
+        start_orientation.x,
+        start_orientation.y,
+        start_orientation.z,
+        start_orientation.w
+    ]
+
+    q_rot = quaternion_about_axis(-theta, (1.0, 0.0, 0.0))
+
+    return quaternion_multiply(q_rot, q_start)
+
+
 def create_arc_waypoints(
         start_pose,
         radius,
         arc_degrees,
-        number_of_points):
+        number_of_points,
+        track_object):
     """
-    Generates an arc in the Y-Z plane.
+    Generates an arc in the Y-Z plane, centered on the object.
 
     +Y = right
     +Z = up
@@ -99,9 +155,11 @@ def create_arc_waypoints(
         delta_y = r * (1 - cos(theta))
         delta_z = r * sin(theta)
 
-    theta ranges from 0 to 60 degrees.
+    theta ranges from 0 to arc_degrees.
 
-    The end-effector orientation remains unchanged.
+    If track_object is True, the end-effector orientation rotates
+    along the arc so the camera keeps aiming at the sphere center;
+    otherwise the orientation remains unchanged.
     """
 
     if radius <= 0.0:
@@ -136,6 +194,17 @@ def create_arc_waypoints(
         waypoint.position.y = start_pose.position.y + delta_y
         waypoint.position.z = start_pose.position.z + delta_z
 
+        if track_object:
+            orientation = compute_aim_orientation(
+                start_pose.orientation,
+                theta
+            )
+
+            waypoint.orientation.x = orientation[0]
+            waypoint.orientation.y = orientation[1]
+            waypoint.orientation.z = orientation[2]
+            waypoint.orientation.w = orientation[3]
+
         waypoints.append(waypoint)
 
         rospy.loginfo(
@@ -152,6 +221,113 @@ def create_arc_waypoints(
         )
 
     return waypoints
+
+
+def add_object_keepout(scene, move_group, center, object_radius):
+    """
+    Adds the object's sphere to the planning scene as a keep-out
+    region so that no part of the arm can plan through it.
+    """
+
+    sphere_pose = PoseStamped()
+    sphere_pose.header.frame_id = move_group.get_planning_frame()
+    sphere_pose.pose.position.x = center.x
+    sphere_pose.pose.position.y = center.y
+    sphere_pose.pose.position.z = center.z
+    sphere_pose.pose.orientation.w = 1.0
+
+    scene.remove_world_object(KEEPOUT_OBJECT_NAME)
+    rospy.sleep(0.5)
+
+    scene.add_sphere(
+        KEEPOUT_OBJECT_NAME,
+        sphere_pose,
+        object_radius
+    )
+
+    rospy.sleep(1.0)
+
+    rospy.loginfo(
+        "Keep-out sphere added: center x=%.6f, y=%.6f, z=%.6f - "
+        "radius %.4f m",
+        center.x,
+        center.y,
+        center.z,
+        object_radius
+    )
+
+
+def pose_distance(pose_a, pose_b):
+    """
+    Euclidean distance between the positions of two poses.
+    """
+
+    return math.sqrt(
+        (pose_a.position.x - pose_b.position.x) ** 2 +
+        (pose_a.position.y - pose_b.position.y) ** 2 +
+        (pose_a.position.z - pose_b.position.z) ** 2
+    )
+
+
+def target_reached(move_group, target_pose):
+    """
+    Checks whether the end-effector is close enough to the target,
+    regardless of what the controller reported.
+    """
+
+    current_pose = move_group.get_current_pose().pose
+
+    distance = pose_distance(current_pose, target_pose)
+
+    rospy.loginfo(
+        "Distance from target: %.4f m",
+        distance
+    )
+
+    return distance <= REACHED_DISTANCE_TOLERANCE
+
+
+def plan_cartesian_segment(move_group, target_pose):
+    """
+    Plans a straight-line Cartesian segment from the current state
+    to the target pose.
+    """
+
+    try:
+        return move_group.compute_cartesian_path(
+            [target_pose],
+            CARTESIAN_EEF_STEP,
+            CARTESIAN_JUMP_THRESHOLD
+        )
+    except TypeError:
+        # Newer MoveIt versions dropped the jump_threshold argument.
+        return move_group.compute_cartesian_path(
+            [target_pose],
+            CARTESIAN_EEF_STEP
+        )
+
+
+def retime_plan(move_group, robot, plan):
+    """
+    Re-times a plan to the configured velocity and acceleration
+    scaling. Cartesian plans ignore the scaling factors set on the
+    move group, so this step is required to keep the motion slow.
+    """
+
+    try:
+        return move_group.retime_trajectory(
+            robot.get_current_state(),
+            plan,
+            velocity_scaling_factor=VELOCITY_SCALE,
+            acceleration_scaling_factor=ACCELERATION_SCALE
+        )
+    except TypeError:
+        # Older MoveIt versions only accept the velocity factor.
+        return move_group.retime_trajectory(
+            robot.get_current_state(),
+            plan,
+            VELOCITY_SCALE
+        )
 
 
 def move_to_joint_position(move_group, joint_position):
@@ -179,9 +355,15 @@ def move_to_joint_position(move_group, joint_position):
     return True
 
 
-def move_to_pose(move_group, target_pose, index, total_points):
+def move_to_pose(move_group, robot, target_pose, index, total_points):
     """
-    Plans and executes the motion toward a single Cartesian waypoint.
+    Moves toward a single Cartesian waypoint.
+
+    Tries a straight-line Cartesian segment first (reliable for the
+    small distances between consecutive waypoints), then falls back
+    to regular pose-target planning. If the controller reports
+    failure but the end-effector is within tolerance of the target,
+    the waypoint is considered reached.
     """
 
     rospy.loginfo(
@@ -191,24 +373,76 @@ def move_to_pose(move_group, target_pose, index, total_points):
     )
 
     move_group.set_start_state_to_current_state()
-    move_group.set_pose_target(target_pose)
 
-    try:
-        success = move_group.go(wait=True)
-    except Exception as error:
-        rospy.logerr(
-            "Error while moving to waypoint %d: %s",
+    success = False
+
+    (plan, fraction) = plan_cartesian_segment(
+        move_group,
+        target_pose
+    )
+
+    if fraction >= CARTESIAN_MIN_FRACTION:
+
+        plan = retime_plan(move_group, robot, plan)
+
+        try:
+            success = move_group.execute(plan, wait=True)
+        except Exception as error:
+            rospy.logwarn(
+                "Error while executing the Cartesian segment for "
+                "waypoint %d: %s",
+                index,
+                str(error)
+            )
+
+        move_group.stop()
+
+    else:
+        rospy.logwarn(
+            "Cartesian segment for waypoint %d only %.0f%% feasible. "
+            "Falling back to pose-target planning.",
             index,
-            str(error)
+            fraction * 100.0
         )
+
+    if not success and target_reached(move_group, target_pose):
+        rospy.logwarn(
+            "Controller reported failure but waypoint %d is within "
+            "tolerance. Continuing.",
+            index
+        )
+        success = True
+
+    if not success:
+
+        rospy.loginfo(
+            "Pose-target planning for waypoint %d/%d...",
+            index,
+            total_points
+        )
+
+        move_group.set_start_state_to_current_state()
+        move_group.set_pose_target(target_pose)
+
+        try:
+            success = move_group.go(wait=True)
+        except Exception as error:
+            rospy.logerr(
+                "Error while moving to waypoint %d: %s",
+                index,
+                str(error)
+            )
 
         move_group.stop()
         move_group.clear_pose_targets()
 
-        return False
-
-    move_group.stop()
-    move_group.clear_pose_targets()
+    if not success and target_reached(move_group, target_pose):
+        rospy.logwarn(
+            "Controller reported failure but waypoint %d is within "
+            "tolerance. Continuing.",
+            index
+        )
+        success = True
 
     if not success:
         rospy.logerr(
@@ -294,15 +528,42 @@ def main():
         NUMBER_OF_POINTS
     )
 
+    track_object = rospy.get_param(
+        "~track_object",
+        True
+    )
+
+    object_radius = rospy.get_param(
+        "~object_radius",
+        radius * OBJECT_RADIUS_RATIO
+    )
+
     rospy.loginfo("Joint file: %s", joint_file)
     rospy.loginfo("Execution enabled: %s", execute_motion)
     rospy.loginfo("Radius: %.4f m", radius)
     rospy.loginfo("Arc: %.2f degrees", arc_degrees)
     rospy.loginfo("Number of waypoints: %d", number_of_points)
+    rospy.loginfo("Camera tracks the object: %s", track_object)
+    rospy.loginfo(
+        "Keep-out sphere radius: %.4f m (0 = disabled)",
+        object_radius
+    )
     rospy.loginfo(
         "Wait between waypoints: %.2f seconds",
         wait_between_points
     )
+
+    if object_radius >= radius:
+        rospy.logerr(
+            "The keep-out sphere radius (%.4f m) must be smaller "
+            "than the arc radius (%.4f m), otherwise the camera "
+            "poses themselves are in collision.",
+            object_radius,
+            radius
+        )
+
+        moveit_commander.roscpp_shutdown()
+        return 1
 
     try:
         initial_joint_position = load_joint_position(joint_file)
@@ -322,6 +583,8 @@ def main():
     )
 
     try:
+        robot = moveit_commander.RobotCommander()
+        scene = moveit_commander.PlanningSceneInterface()
         move_group = moveit_commander.MoveGroupCommander(
             PLANNING_GROUP
         )
@@ -416,12 +679,36 @@ def main():
         move_group.get_current_pose().pose
     )
 
+    sphere_center = compute_sphere_center(start_pose, radius)
+
+    rospy.loginfo(
+        "Object (sphere center): x=%.6f, y=%.6f, z=%.6f - "
+        "camera-object distance %.4f m",
+        sphere_center.x,
+        sphere_center.y,
+        sphere_center.z,
+        radius
+    )
+
+    if object_radius > 0.0:
+        add_object_keepout(
+            scene,
+            move_group,
+            sphere_center,
+            object_radius
+        )
+    else:
+        rospy.logwarn(
+            "Keep-out sphere disabled (_object_radius <= 0)."
+        )
+
     try:
         waypoints = create_arc_waypoints(
             start_pose=start_pose,
             radius=radius,
             arc_degrees=arc_degrees,
-            number_of_points=number_of_points
+            number_of_points=number_of_points,
+            track_object=track_object
         )
     except Exception as error:
         rospy.logerr(
@@ -450,6 +737,7 @@ def main():
 
         success = move_to_pose(
             move_group=move_group,
+            robot=robot,
             target_pose=waypoint,
             index=index,
             total_points=total_points

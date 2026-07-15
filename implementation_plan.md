@@ -27,37 +27,46 @@ distance**:
 
 ## Current implementation status
 
-The existing script already does the core mechanics — start from a CSV joint configuration,
-step through arc waypoints in the Y-Z plane at 5 % speed, pause at each waypoint, log exact
-poses. What still differs from the goal:
+All development-phase features are **implemented** (2026-07-15), pending test on the robot:
 
-| | Current script | Goal |
-|---|---|---|
-| Arc sweep | 60° | 60° for development, 180° eventually |
-| Waypoints | 8 | 9 (`_number_of_points:=9`, no code change) |
-| Camera orientation | frozen | rotates to always aim at the object |
-| Object sphere keep-out | none | sphere collision object in MoveIt |
+| | Status |
+|---|---|
+| Arc sweep | 60° (development value; 180° eventually) |
+| Waypoints | default 9 |
+| Camera orientation | rotates by −θ about X at each waypoint so the camera always aims at the object (`_track_object`, default `true`); math verified numerically — constant distance, ~0 aim error |
+| Object sphere keep-out | sphere collision object added to the MoveIt planning scene at the computed center (`_object_radius`, default half the arc radius, `0` disables; must be < arc radius) |
 
-Remaining code changes (both in `panda_semicircle_motion.py`):
+### Motion-reliability fix (robot stopped after waypoint 1)
 
-1. **Camera orientation tracking** — compute, for each waypoint, the orientation that points
-   the phone camera at the sphere center, instead of copying the start orientation.
-2. **Sphere keep-out** — add the object's sphere as a MoveIt collision object
-   (`PlanningSceneInterface`) so no plan takes any part of the arm through it.
+Observed on the robot: arm reaches the initial pose, makes one small move, then stops.
+Likely causes: with `_radius:=0.03` consecutive waypoints are only ~4 mm apart at 5 % speed
+(nearly invisible motion), and tiny `set_pose_target` + `go()` moves are exactly where
+OMPL planning / Franka controller goal tolerances fail. Fix in `move_to_pose`:
+
+1. Each segment is planned as a **straight-line Cartesian path** (`compute_cartesian_path`),
+   then **re-timed to 5 % speed** (`retime_trajectory` — Cartesian plans ignore the move
+   group's speed scaling, so without re-timing they'd run at full speed).
+2. If the Cartesian plan covers < 99.9 % of the segment, **fall back** to the original
+   `set_pose_target` + `go()`.
+3. If the controller reports failure but the end-effector is actually **within 5 mm of the
+   target**, log a warning and continue instead of aborting (Franka's controller often
+   reports "goal tolerance violated" even though the arm arrived).
 
 ## How the current script works (`panda_semicircle_motion.py`)
 
 1. Reads a **7-joint start configuration** from a CSV file (`joint_start.csv`).
 2. Moves the arm to that joint configuration and waits 2 s.
-3. Reads the Cartesian pose actually reached — this becomes the arc origin.
-4. Generates **8 waypoints** along a **60° arc of radius 3 cm** in the **Y-Z plane**:
-   - `delta_y = r * (1 - cos θ)`, `delta_z = r * sin θ`
+3. Reads the Cartesian pose actually reached — this becomes the arc origin, and the
+   **object (sphere center) is placed at distance `r` in +Y** from it, at the same height.
+4. Adds the **keep-out sphere** at the center (unless `_object_radius:=0`).
+5. Generates **9 waypoints** along a **60° arc of radius `r`** in the **Y-Z plane**:
+   - `delta_y = r * (1 - cos θ)`, `delta_z = r * sin θ` — constant distance `r` from the object
    - motion starts mostly **upward (+Z)** and curves toward **+Y (right)**
-   - the arc's center is at distance `r` in +Y from the start pose, at the same height —
-     that center is where the object goes
-   - **X and end-effector orientation stay constant**
-5. Moves to each waypoint one by one (each waypoint is planned and executed separately),
-   **waiting 2 s between waypoints**, and logs the exact pose reached at every stop.
+   - **X stays constant**; orientation rotates by −θ about X so the camera keeps aiming at
+     the object (frozen instead if `_track_object:=false`)
+6. Moves to each waypoint one by one (straight-line Cartesian segment, re-timed to 5 % speed,
+   with pose-target fallback), **waiting 2 s between waypoints**, and logs the exact pose
+   reached at every stop.
 
 Safety defaults: velocity and acceleration scaled to **5 %**, and **nothing moves unless
 `_execute:=true`** — without it the script only loads/validates everything and exits
@@ -75,10 +84,17 @@ Safety defaults: velocity and acceleration scaled to **5 %**, and **nothing move
 ## Notes / caveats
 
 - Despite the name "semicircle", the default trajectory is a **60° arc**, not 180°.
-- Each waypoint is reached with an independent MoveIt plan (`set_pose_target` + `go`), so the
-  path **between** waypoints is not guaranteed to follow the arc exactly — only the waypoints
-  themselves are on the arc.
-- If any waypoint fails to plan/execute, the trajectory stops there with an error.
+- Segments between waypoints are straight lines (chords of the arc), not the arc itself —
+  for adjacent waypoints a few mm apart the deviation is micrometers.
+- If any waypoint fails to plan/execute (and the arm is not within 5 mm of it), the
+  trajectory stops there with an error.
 - The dry-run mode (`_execute:=false`) exits **before planning**, so it does not catch
   unreachable waypoints — do a real run at 5 % speed with the e-stop ready to verify
   reachability.
+- The camera-object distance will be **3–5 cm; default/test value is 4 cm** (`_radius:=0.04`).
+  At that scale the **whole motion spans only ~4 cm** (waypoints ~5 mm apart) — at 5 % speed
+  it is easy to mistake for "not moving". Check the terminal for "Waypoint N/9 reached" vs
+  "Trajectory stopped at waypoint N".
+- The pose being controlled is the MoveIt end-effector frame (flange/hand), **not the phone
+  lens** — at a 4 cm radius the offset between the two matters, and the physical hand/phone
+  may not even fit that close to the object.

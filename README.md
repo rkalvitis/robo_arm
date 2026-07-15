@@ -56,10 +56,12 @@ All are private ROS params (`_name:=value`):
 |---|---|---|
 | `_joint_file` | `joint_start.csv` next to the script | CSV with the 7 start joint values |
 | `_execute` | `false` | `true` = move the real robot |
-| `_radius` | `0.03` (m) | Arc radius |
+| `_radius` | `0.04` (m) | Arc radius = camera-object distance (target range 3–5 cm) |
 | `_arc_degrees` | `60.0` | Arc sweep angle |
-| `_number_of_points` | `8` | Number of waypoints along the arc |
+| `_number_of_points` | `9` | Number of waypoints (photo poses) along the arc |
 | `_wait_between_points` | `2.0` (s) | Pause at each waypoint |
+| `_track_object` | `true` | Rotate the camera along the arc so it always aims at the object; `false` = keep orientation frozen |
+| `_object_radius` | `0.5 × _radius` (m) | Radius of the keep-out collision sphere around the object. **A value in meters** (the 0.5 is a ratio, only used for the default). `0` disables it; must be smaller than `_radius` |
 
 Example with custom arc:
 
