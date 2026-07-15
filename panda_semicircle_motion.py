@@ -36,6 +36,12 @@ import rospy
 import moveit_commander
 
 from geometry_msgs.msg import PoseStamped
+from moveit_msgs.msg import (
+    AllowedCollisionEntry,
+    PlanningScene,
+    PlanningSceneComponents
+)
+from moveit_msgs.srv import GetPlanningScene
 from tf.transformations import quaternion_about_axis, quaternion_multiply
 
 
@@ -71,6 +77,13 @@ REACHED_DISTANCE_TOLERANCE = 0.005
 OBJECT_RADIUS_RATIO = 0.5
 
 KEEPOUT_OBJECT_NAME = "object_keepout"
+
+# Links allowed to touch the keep-out sphere. The hand carries the
+# camera and must get within 'radius' of the object, so it cannot be
+# collision-checked against the sphere; the rest of the arm still is.
+KEEPOUT_IGNORED_LINKS = (
+    "panda_link8,panda_hand,panda_leftfinger,panda_rightfinger"
+)
 
 
 def load_joint_position(file_path):
@@ -257,6 +270,80 @@ def add_object_keepout(scene, move_group, center, object_radius):
     )
 
 
+def allow_keepout_collisions(ignored_links):
+    """
+    Marks the given links as allowed to collide with the keep-out
+    sphere in the Allowed Collision Matrix. Without this the hand,
+    which must get within 'radius' of the object, puts the robot
+    permanently in collision and every plan fails.
+    """
+
+    rospy.wait_for_service("/get_planning_scene", timeout=5.0)
+
+    get_scene = rospy.ServiceProxy(
+        "/get_planning_scene",
+        GetPlanningScene
+    )
+
+    components = PlanningSceneComponents(
+        components=PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+    )
+
+    acm = get_scene(components).scene.allowed_collision_matrix
+
+    if KEEPOUT_OBJECT_NAME not in acm.entry_names:
+
+        acm.entry_names.append(KEEPOUT_OBJECT_NAME)
+
+        for entry in acm.entry_values:
+            entry.enabled.append(False)
+
+        acm.entry_values.append(
+            AllowedCollisionEntry(
+                enabled=[False] * len(acm.entry_names)
+            )
+        )
+
+    keepout_index = acm.entry_names.index(KEEPOUT_OBJECT_NAME)
+
+    for link in ignored_links:
+
+        if link not in acm.entry_names:
+            rospy.logwarn(
+                "Link '%s' not found in the collision matrix. "
+                "Skipping.",
+                link
+            )
+            continue
+
+        link_index = acm.entry_names.index(link)
+
+        acm.entry_values[link_index].enabled[keepout_index] = True
+        acm.entry_values[keepout_index].enabled[link_index] = True
+
+    scene_diff = PlanningScene()
+    scene_diff.is_diff = True
+    scene_diff.allowed_collision_matrix = acm
+
+    publisher = rospy.Publisher(
+        "/planning_scene",
+        PlanningScene,
+        queue_size=1,
+        latch=True
+    )
+
+    rospy.sleep(0.5)
+
+    publisher.publish(scene_diff)
+
+    rospy.sleep(0.5)
+
+    rospy.loginfo(
+        "Keep-out collisions allowed for links: %s",
+        ", ".join(ignored_links)
+    )
+
+
 def pose_distance(pose_a, pose_b):
     """
     Euclidean distance between the positions of two poses.
@@ -405,6 +492,15 @@ def move_to_pose(move_group, robot, target_pose, index, total_points):
             fraction * 100.0
         )
 
+        if fraction <= 0.0:
+            rospy.logwarn(
+                "0%% feasible usually means the current state is "
+                "considered in collision - e.g. the keep-out sphere "
+                "touching a link that is not in "
+                "_keepout_ignored_links. Try _object_radius:=0 to "
+                "check."
+            )
+
     if not success and target_reached(move_group, target_pose):
         rospy.logwarn(
             "Controller reported failure but waypoint %d is within "
@@ -537,6 +633,15 @@ def main():
         "~object_radius",
         radius * OBJECT_RADIUS_RATIO
     )
+
+    keepout_ignored_links = [
+        link.strip()
+        for link in rospy.get_param(
+            "~keepout_ignored_links",
+            KEEPOUT_IGNORED_LINKS
+        ).split(",")
+        if link.strip()
+    ]
 
     rospy.loginfo("Joint file: %s", joint_file)
     rospy.loginfo("Execution enabled: %s", execute_motion)
@@ -697,6 +802,17 @@ def main():
             sphere_center,
             object_radius
         )
+
+        try:
+            allow_keepout_collisions(keepout_ignored_links)
+        except Exception as error:
+            rospy.logerr(
+                "Unable to update the collision matrix: %s. "
+                "The hand may be considered in collision with the "
+                "keep-out sphere and planning may fail. Use "
+                "_object_radius:=0 to disable the sphere.",
+                str(error)
+            )
     else:
         rospy.logwarn(
             "Keep-out sphere disabled (_object_radius <= 0)."
