@@ -2,19 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-Movimento ad arco per Franka Emika Panda.
+Arc motion for Franka Emika Panda.
 
-Lo script:
+The script:
 
-1. legge una configurazione articolare iniziale da un file CSV;
-2. sposta il robot nella configurazione iniziale;
-3. legge la posa cartesiana raggiunta;
-4. genera 8 waypoint nel piano Y-Z;
-5. mantiene X e orientamento costanti;
-6. si muove prima verso +Z e poi verso +Y;
-7. attende 2 secondi tra un waypoint e il successivo.
+1. reads an initial joint configuration from a CSV file;
+2. moves the robot to the initial configuration;
+3. reads the Cartesian pose that was reached;
+4. generates 8 waypoints in the Y-Z plane;
+5. keeps X and orientation constant;
+6. moves first toward +Z and then toward +Y;
+7. waits 2 seconds between one waypoint and the next.
 
-Esempio joint_start.csv:
+Example joint_start.csv:
 
 0.013337267496607689,0.13310515648967364,0.12014143002274653,-1.703551451575958,0.007806931131451653,1.0049740870915318,0.9248341724704006
 """
@@ -53,14 +53,14 @@ PLANNING_ATTEMPTS = 10
 
 def load_joint_position(file_path):
     """
-    Legge esattamente 7 valori joint da un file CSV.
+    Reads exactly 7 joint values from a CSV file.
     """
 
     file_path = os.path.abspath(os.path.expanduser(file_path))
 
     if not os.path.isfile(file_path):
         raise IOError(
-            "File delle joint non trovato: {}".format(file_path)
+            "Joint file not found: {}".format(file_path)
         )
 
     values = np.loadtxt(file_path, delimiter=",")
@@ -68,13 +68,13 @@ def load_joint_position(file_path):
 
     if values.size != 7:
         raise ValueError(
-            "Il file deve contenere esattamente 7 valori joint. "
-            "Valori trovati: {}".format(values.size)
+            "The file must contain exactly 7 joint values. "
+            "Values found: {}".format(values.size)
         )
 
     if not np.all(np.isfinite(values)):
         raise ValueError(
-            "Il file contiene valori non validi, NaN o infiniti."
+            "The file contains invalid, NaN or infinite values."
         )
 
     return values.tolist()
@@ -86,30 +86,30 @@ def create_arc_waypoints(
         arc_degrees,
         number_of_points):
     """
-    Genera un arco nel piano Y-Z.
+    Generates an arc in the Y-Z plane.
 
-    +Y = destra
-    +Z = alto
+    +Y = right
+    +Z = up
 
-    La traiettoria parte dalla posa corrente e inizialmente si muove
-    soprattutto verso +Z. Successivamente si sposta anche verso +Y.
+    The trajectory starts from the current pose and initially moves
+    mostly toward +Z. Afterwards it also moves toward +Y.
 
     Formula:
 
         delta_y = r * (1 - cos(theta))
         delta_z = r * sin(theta)
 
-    theta varia da 0 a 60 gradi.
+    theta ranges from 0 to 60 degrees.
 
-    L'orientamento dell'end-effector rimane invariato.
+    The end-effector orientation remains unchanged.
     """
 
     if radius <= 0.0:
-        raise ValueError("Il raggio deve essere maggiore di zero.")
+        raise ValueError("The radius must be greater than zero.")
 
     if number_of_points <= 0:
         raise ValueError(
-            "Il numero di waypoint deve essere maggiore di zero."
+            "The number of waypoints must be greater than zero."
         )
 
     waypoints = []
@@ -117,7 +117,7 @@ def create_arc_waypoints(
     total_angle = math.radians(arc_degrees)
 
     rospy.loginfo(
-        "Posa iniziale: x=%.6f, y=%.6f, z=%.6f",
+        "Initial pose: x=%.6f, y=%.6f, z=%.6f",
         start_pose.position.x,
         start_pose.position.y,
         start_pose.position.z
@@ -139,9 +139,9 @@ def create_arc_waypoints(
         waypoints.append(waypoint)
 
         rospy.loginfo(
-            "Waypoint %d/%d - angolo %.2f deg - "
+            "Waypoint %d/%d - angle %.2f deg - "
             "delta Y %.6f m - delta Z %.6f m - "
-            "posizione Y %.6f - posizione Z %.6f",
+            "position Y %.6f - position Z %.6f",
             index,
             number_of_points,
             math.degrees(theta),
@@ -156,10 +156,10 @@ def create_arc_waypoints(
 
 def move_to_joint_position(move_group, joint_position):
     """
-    Muove il robot verso la configurazione articolare specificata.
+    Moves the robot to the specified joint configuration.
     """
 
-    rospy.loginfo("Movimento verso la posizione articolare iniziale...")
+    rospy.loginfo("Moving to the initial joint position...")
 
     move_group.set_joint_value_target(joint_position)
 
@@ -170,22 +170,22 @@ def move_to_joint_position(move_group, joint_position):
 
     if not success:
         rospy.logerr(
-            "Impossibile raggiungere la posizione articolare iniziale."
+            "Unable to reach the initial joint position."
         )
         return False
 
-    rospy.loginfo("Posizione articolare iniziale raggiunta.")
+    rospy.loginfo("Initial joint position reached.")
 
     return True
 
 
 def move_to_pose(move_group, target_pose, index, total_points):
     """
-    Pianifica ed esegue il movimento verso un singolo waypoint cartesiano.
+    Plans and executes the motion toward a single Cartesian waypoint.
     """
 
     rospy.loginfo(
-        "Pianificazione waypoint %d/%d...",
+        "Planning waypoint %d/%d...",
         index,
         total_points
     )
@@ -197,7 +197,7 @@ def move_to_pose(move_group, target_pose, index, total_points):
         success = move_group.go(wait=True)
     except Exception as error:
         rospy.logerr(
-            "Errore durante il movimento verso il waypoint %d: %s",
+            "Error while moving to waypoint %d: %s",
             index,
             str(error)
         )
@@ -212,14 +212,14 @@ def move_to_pose(move_group, target_pose, index, total_points):
 
     if not success:
         rospy.logerr(
-            "Impossibile raggiungere il waypoint %d/%d.",
+            "Unable to reach waypoint %d/%d.",
             index,
             total_points
         )
         return False
 
     rospy.loginfo(
-        "Waypoint %d/%d raggiunto.",
+        "Waypoint %d/%d reached.",
         index,
         total_points
     )
@@ -229,13 +229,13 @@ def move_to_pose(move_group, target_pose, index, total_points):
 
 def print_current_pose(move_group, label):
     """
-    Stampa la posa cartesiana corrente.
+    Prints the current Cartesian pose.
     """
 
     pose = move_group.get_current_pose().pose
 
     rospy.loginfo(
-        "%s - posizione: x=%.6f, y=%.6f, z=%.6f",
+        "%s - position: x=%.6f, y=%.6f, z=%.6f",
         label,
         pose.position.x,
         pose.position.y,
@@ -243,7 +243,7 @@ def print_current_pose(move_group, label):
     )
 
     rospy.loginfo(
-        "%s - orientamento: x=%.6f, y=%.6f, z=%.6f, w=%.6f",
+        "%s - orientation: x=%.6f, y=%.6f, z=%.6f, w=%.6f",
         label,
         pose.orientation.x,
         pose.orientation.y,
@@ -294,13 +294,13 @@ def main():
         NUMBER_OF_POINTS
     )
 
-    rospy.loginfo("File joint: %s", joint_file)
-    rospy.loginfo("Esecuzione abilitata: %s", execute_motion)
-    rospy.loginfo("Raggio: %.4f m", radius)
-    rospy.loginfo("Arco: %.2f gradi", arc_degrees)
-    rospy.loginfo("Numero waypoint: %d", number_of_points)
+    rospy.loginfo("Joint file: %s", joint_file)
+    rospy.loginfo("Execution enabled: %s", execute_motion)
+    rospy.loginfo("Radius: %.4f m", radius)
+    rospy.loginfo("Arc: %.2f degrees", arc_degrees)
+    rospy.loginfo("Number of waypoints: %d", number_of_points)
     rospy.loginfo(
-        "Attesa tra i waypoint: %.2f secondi",
+        "Wait between waypoints: %.2f seconds",
         wait_between_points
     )
 
@@ -308,7 +308,7 @@ def main():
         initial_joint_position = load_joint_position(joint_file)
     except Exception as error:
         rospy.logerr(
-            "Errore nella lettura del file delle joint: %s",
+            "Error while reading the joint file: %s",
             str(error)
         )
 
@@ -316,7 +316,7 @@ def main():
         return 1
 
     rospy.loginfo(
-        "Configurazione iniziale: %s",
+        "Initial configuration: %s",
         ["{:.9f}".format(value)
          for value in initial_joint_position]
     )
@@ -327,7 +327,7 @@ def main():
         )
     except Exception as error:
         rospy.logerr(
-            "Impossibile inizializzare MoveGroupCommander: %s",
+            "Unable to initialize MoveGroupCommander: %s",
             str(error)
         )
 
@@ -368,7 +368,7 @@ def main():
 
     if len(current_joint_values) != 7:
         rospy.logerr(
-            "Il planning group '%s' contiene %d joint invece di 7.",
+            "The planning group '%s' contains %d joints instead of 7.",
             PLANNING_GROUP,
             len(current_joint_values)
         )
@@ -378,11 +378,11 @@ def main():
 
     if not execute_motion:
         rospy.logwarn(
-            "Modalita di sicurezza attiva: il robot non verra mosso."
+            "Safety mode active: the robot will not be moved."
         )
 
         rospy.logwarn(
-            "Per eseguire realmente il movimento aggiungere "
+            "To actually execute the motion add "
             "_execute:=true."
         )
 
@@ -390,8 +390,8 @@ def main():
         return 0
 
     rospy.logwarn(
-        "Controllare che l'area di lavoro sia libera e "
-        "che il pulsante di arresto sia disponibile."
+        "Check that the workspace is clear and "
+        "that the emergency stop button is available."
     )
 
     if not move_to_joint_position(
@@ -401,7 +401,7 @@ def main():
         return 1
 
     rospy.loginfo(
-        "Attesa di %.2f secondi nella posizione iniziale...",
+        "Waiting %.2f seconds at the initial position...",
         WAIT_AFTER_INITIAL_POSITION
     )
 
@@ -409,7 +409,7 @@ def main():
 
     print_current_pose(
         move_group,
-        "Posa iniziale raggiunta"
+        "Initial pose reached"
     )
 
     start_pose = copy.deepcopy(
@@ -425,7 +425,7 @@ def main():
         )
     except Exception as error:
         rospy.logerr(
-            "Errore nella generazione dei waypoint: %s",
+            "Error while generating the waypoints: %s",
             str(error)
         )
 
@@ -438,12 +438,12 @@ def main():
 
         if rospy.is_shutdown():
             rospy.logwarn(
-                "ROS arrestato. Interruzione del movimento."
+                "ROS shut down. Stopping the motion."
             )
             break
 
         rospy.loginfo(
-            "Movimento verso waypoint %d/%d...",
+            "Moving to waypoint %d/%d...",
             index,
             total_points
         )
@@ -457,7 +457,7 @@ def main():
 
         if not success:
             rospy.logerr(
-                "Traiettoria interrotta al waypoint %d.",
+                "Trajectory stopped at waypoint %d.",
                 index
             )
 
@@ -466,19 +466,19 @@ def main():
 
         print_current_pose(
             move_group,
-            "Waypoint {} raggiunto".format(index)
+            "Waypoint {} reached".format(index)
         )
 
         if index < total_points:
             rospy.loginfo(
-                "Attesa di %.2f secondi prima del prossimo waypoint...",
+                "Waiting %.2f seconds before the next waypoint...",
                 wait_between_points
             )
 
             rospy.sleep(wait_between_points)
 
     rospy.loginfo(
-        "Tutti i waypoint sono stati completati."
+        "All waypoints have been completed."
     )
 
     move_group.stop()
