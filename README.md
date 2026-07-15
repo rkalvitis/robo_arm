@@ -64,6 +64,8 @@ All are private ROS params (`_name:=value`):
 | `_object_radius` | `0.5 × _radius` (m) | Radius of the keep-out collision sphere around the object. **A value in meters** (the 0.5 is a ratio, only used for the default). `0` disables it; must be smaller than `_radius` |
 | `_keepout_ignored_links` | hand + finger links incl. `*_sc` capsule variants | Links allowed to touch the keep-out sphere (the hand carries the camera and must get that close); the rest of the arm is still kept out. The script also auto-detects and exempts (with a warning) any link still in contact with the sphere at the start pose |
 | `_rod_radius` | `0.005` (m) | Radius of the collision cylinder for the object's **support rod** (real rod is 2 mm; default includes a 3 mm margin). Vertical, from the ground to the object; **no link is exempt from it**. `0` disables |
+| `_object_height` | `0.55` (m) | Height of the object above the **ground** = length of the support rod (the rod hangs that far below the object in the planning scene) |
+| `_output_file` | `arc_poses_<date>_<time>.csv` | CSV file recording, for the start pose and every waypoint reached: the 7 joint values, end-effector position, and orientation quaternion. Written incrementally, so an aborted run keeps everything up to the failure |
 
 Example with custom arc:
 

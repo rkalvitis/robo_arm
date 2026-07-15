@@ -28,8 +28,13 @@ distance**:
 - **Safety constraint:** no part of the arm may ever enter the object's sphere (add it as a
   keep-out collision object in MoveIt).
 - **Support rod:** the object is held by a thin vertical rod (2 mm radius) reaching from the
-  ground up to the object. The arm must never touch it — modeled as a vertical collision
-  cylinder (`_rod_radius`, default 5 mm = rod + margin, no link exempt).
+  ground up to the object, which sits **55 cm above the ground** (`_object_height`). The arm
+  must never touch the rod — modeled as a vertical collision cylinder hanging 55 cm below the
+  object (`_rod_radius`, default 5 mm = rod + margin, no link exempt).
+- **Pose recording:** every run writes a CSV (`_output_file`, default
+  `arc_poses_<timestamp>.csv`) with one row per stop — waypoint index, arc angle, the 7 joint
+  values, end-effector position, and orientation quaternion — flushed after each stop, for
+  matching photos to exact camera poses.
 
 ## Current implementation status
 

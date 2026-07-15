@@ -28,6 +28,8 @@ Example joint_start.csv:
 from __future__ import print_function
 
 import copy
+import csv
+import datetime
 import math
 import os
 import sys
@@ -83,6 +85,15 @@ KEEPOUT_OBJECT_NAME = "object_keepout"
 # from the ground. Modeled with a safety margin; 0 disables it.
 ROD_OBJECT_NAME = "support_rod"
 SUPPORT_ROD_RADIUS = 0.005
+
+POSE_LOG_HEADER = [
+    "waypoint",
+    "angle_deg",
+    "joint1", "joint2", "joint3", "joint4",
+    "joint5", "joint6", "joint7",
+    "position_x", "position_y", "position_z",
+    "orientation_x", "orientation_y", "orientation_z", "orientation_w"
+]
 
 # Links allowed to touch the keep-out sphere. The hand carries the
 # camera and must get within 'radius' of the object, so it cannot be
@@ -285,19 +296,19 @@ def add_object_keepout(scene, move_group, center, object_radius):
     )
 
 
-def add_support_rod(scene, move_group, center, rod_radius):
+def add_support_rod(scene, move_group, center, rod_radius, rod_length):
     """
-    Adds the object's support rod - a thin vertical cylinder from
-    the ground (z = 0 in the planning frame) up to the object - as a
-    collision object. Unlike the keep-out sphere, NO link is exempt
-    from it: nothing on the robot may ever touch the rod.
+    Adds the object's support rod - a thin vertical cylinder that
+    holds the object 'rod_length' above the ground - as a collision
+    object. Unlike the keep-out sphere, NO link is exempt from it:
+    nothing on the robot may ever touch the rod.
     """
 
     rod_pose = PoseStamped()
     rod_pose.header.frame_id = move_group.get_planning_frame()
     rod_pose.pose.position.x = center.x
     rod_pose.pose.position.y = center.y
-    rod_pose.pose.position.z = center.z / 2.0
+    rod_pose.pose.position.z = center.z - rod_length / 2.0
     rod_pose.pose.orientation.w = 1.0
 
     scene.remove_world_object(ROD_OBJECT_NAME)
@@ -307,7 +318,7 @@ def add_support_rod(scene, move_group, center, rod_radius):
         scene.add_cylinder(
             ROD_OBJECT_NAME,
             rod_pose,
-            center.z,
+            rod_length,
             rod_radius
         )
     except AttributeError:
@@ -315,19 +326,64 @@ def add_support_rod(scene, move_group, center, rod_radius):
         scene.add_box(
             ROD_OBJECT_NAME,
             rod_pose,
-            (2.0 * rod_radius, 2.0 * rod_radius, center.z)
+            (2.0 * rod_radius, 2.0 * rod_radius, rod_length)
         )
 
     rospy.sleep(1.0)
 
     rospy.loginfo(
-        "Support rod added: x=%.6f, y=%.6f, from the ground to "
-        "z=%.6f - radius %.4f m (no link is exempt from it)",
+        "Support rod added: x=%.6f, y=%.6f, from z=%.6f (ground) "
+        "up to z=%.6f - radius %.4f m (no link is exempt from it)",
         center.x,
         center.y,
+        center.z - rod_length,
         center.z,
         rod_radius
     )
+
+
+def open_pose_log(file_path):
+    """
+    Opens the CSV output file and writes the header. Rows are
+    flushed after every waypoint, so an aborted run keeps all the
+    poses recorded up to the failure.
+    """
+
+    file_path = os.path.abspath(os.path.expanduser(file_path))
+
+    handle = open(file_path, "w")
+    writer = csv.writer(handle)
+    writer.writerow(POSE_LOG_HEADER)
+    handle.flush()
+
+    rospy.loginfo("Recording poses to: %s", file_path)
+
+    return handle, writer
+
+
+def log_current_pose(handle, writer, move_group, waypoint, angle_deg):
+    """
+    Appends the current joint values and end-effector pose to the
+    output file.
+    """
+
+    joints = move_group.get_current_joint_values()
+    pose = move_group.get_current_pose().pose
+
+    writer.writerow(
+        [waypoint, "{:.4f}".format(angle_deg)]
+        + ["{:.9f}".format(value) for value in joints]
+        + ["{:.9f}".format(value) for value in (
+            pose.position.x,
+            pose.position.y,
+            pose.position.z,
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w)]
+    )
+
+    handle.flush()
 
 
 def allow_keepout_collisions(ignored_links):
@@ -794,6 +850,22 @@ def main():
         SUPPORT_ROD_RADIUS
     )
 
+    # Height of the object above the ground = length of the rod.
+    object_height = rospy.get_param(
+        "~object_height",
+        0.55
+    )
+
+    output_file = rospy.get_param(
+        "~output_file",
+        ""
+    )
+
+    if not output_file:
+        output_file = "arc_poses_{}.csv".format(
+            datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        )
+
     rospy.loginfo("Joint file: %s", joint_file)
     rospy.loginfo("Execution enabled: %s", execute_motion)
     rospy.loginfo("Radius: %.4f m", radius)
@@ -807,6 +879,14 @@ def main():
     rospy.loginfo(
         "Support rod radius: %.4f m (0 = disabled)",
         rod_radius
+    )
+    rospy.loginfo(
+        "Object height above the ground: %.3f m",
+        object_height
+    )
+    rospy.loginfo(
+        "Output file for joint values and poses: %s",
+        output_file
     )
     rospy.loginfo(
         "Wait between waypoints: %.2f seconds",
@@ -948,6 +1028,20 @@ def main():
         move_group.get_current_pose().pose
     )
 
+    try:
+        log_handle, log_writer = open_pose_log(output_file)
+    except Exception as error:
+        rospy.logerr(
+            "Unable to open the output file: %s",
+            str(error)
+        )
+
+        moveit_commander.roscpp_shutdown()
+        return 1
+
+    # The start pose is recorded as waypoint 0 at angle 0.
+    log_current_pose(log_handle, log_writer, move_group, 0, 0.0)
+
     sphere_center = compute_sphere_center(start_pose, radius)
 
     rospy.loginfo(
@@ -964,7 +1058,8 @@ def main():
             scene,
             move_group,
             sphere_center,
-            rod_radius
+            rod_radius,
+            object_height
         )
     else:
         rospy.logwarn(
@@ -1044,16 +1139,27 @@ def main():
 
         if not success:
             rospy.logerr(
-                "Trajectory stopped at waypoint %d.",
-                index
+                "Trajectory stopped at waypoint %d. Poses recorded "
+                "so far are kept in %s",
+                index,
+                output_file
             )
 
+            log_handle.close()
             moveit_commander.roscpp_shutdown()
             return 1
 
         print_current_pose(
             move_group,
             "Waypoint {} reached".format(index)
+        )
+
+        log_current_pose(
+            log_handle,
+            log_writer,
+            move_group,
+            index,
+            arc_degrees * float(index) / float(total_points)
         )
 
         if index < total_points:
@@ -1066,6 +1172,13 @@ def main():
 
     rospy.loginfo(
         "All waypoints have been completed."
+    )
+
+    log_handle.close()
+
+    rospy.loginfo(
+        "Joint values and poses saved to: %s",
+        os.path.abspath(os.path.expanduser(output_file))
     )
 
     move_group.stop()
