@@ -296,19 +296,24 @@ def add_object_keepout(scene, move_group, center, object_radius):
     )
 
 
-def add_support_rod(scene, move_group, center, rod_radius, rod_length):
+def add_support_rod(scene, move_group, center, rod_radius,
+                    object_height):
     """
     Adds the object's support rod - a thin vertical cylinder that
-    holds the object 'rod_length' above the ground - as a collision
-    object. Unlike the keep-out sphere, NO link is exempt from it:
-    nothing on the robot may ever touch the rod.
+    holds the object 'object_height' above the ground - as a
+    collision object, at full height (ground to object). Unlike the
+    keep-out sphere, NO link is exempt from it.
     """
+
+    bottom_z = center.z - object_height
+    top_z = center.z
+    rod_length = max(top_z - bottom_z, 0.01)
 
     rod_pose = PoseStamped()
     rod_pose.header.frame_id = move_group.get_planning_frame()
     rod_pose.pose.position.x = center.x
     rod_pose.pose.position.y = center.y
-    rod_pose.pose.position.z = center.z - rod_length / 2.0
+    rod_pose.pose.position.z = bottom_z + rod_length / 2.0
     rod_pose.pose.orientation.w = 1.0
 
     scene.remove_world_object(ROD_OBJECT_NAME)
@@ -332,12 +337,12 @@ def add_support_rod(scene, move_group, center, rod_radius, rod_length):
     rospy.sleep(1.0)
 
     rospy.loginfo(
-        "Support rod added: x=%.6f, y=%.6f, from z=%.6f (ground) "
-        "up to z=%.6f - radius %.4f m (no link is exempt from it)",
+        "Support rod added: x=%.6f, y=%.6f, from z=%.3f (ground) "
+        "up to z=%.3f (the object) - radius %.4f m",
         center.x,
         center.y,
-        center.z - rod_length,
-        center.z,
+        bottom_z,
+        bottom_z + rod_length,
         rod_radius
     )
 
@@ -463,9 +468,10 @@ def allow_keepout_collisions(ignored_links):
 def find_keepout_contacts(robot):
     """
     Asks move_group whether the current state is collision-free and
-    which bodies are in contact with the keep-out sphere.
+    which bodies are in contact with the keep-out sphere or the
+    support rod.
 
-    Returns (valid, sphere_links, other_pairs).
+    Returns (valid, sphere_links, rod_links, other_pairs).
     """
 
     rospy.wait_for_service("/check_state_validity", timeout=5.0)
@@ -481,6 +487,7 @@ def find_keepout_contacts(robot):
     )
 
     sphere_links = set()
+    rod_links = set()
     other_pairs = []
 
     for contact in response.contacts:
@@ -493,6 +500,9 @@ def find_keepout_contacts(robot):
         if KEEPOUT_OBJECT_NAME in bodies:
             bodies.discard(KEEPOUT_OBJECT_NAME)
             sphere_links.update(bodies)
+        elif ROD_OBJECT_NAME in bodies:
+            bodies.discard(ROD_OBJECT_NAME)
+            rod_links.update(bodies)
         else:
             other_pairs.append(
                 "{} <-> {}".format(
@@ -501,27 +511,29 @@ def find_keepout_contacts(robot):
                 )
             )
 
-    return response.valid, sorted(sphere_links), other_pairs
+    return (response.valid, sorted(sphere_links),
+            sorted(rod_links), other_pairs)
 
 
-def ensure_state_clear_of_keepout(robot):
+def ensure_state_clear(robot):
     """
     Verifies that the current state is not considered in collision
-    with the keep-out sphere. Any link still touching the sphere is
-    exempted (the camera mount has to sit this close to the object),
-    with a warning so it is always visible what was exempted.
+    with the keep-out sphere or the support rod. Links touching the
+    sphere are exempted (the camera mount has to sit this close to
+    the object); a collision with the rod is an error - the rod is
+    always checked at full height.
     """
 
-    for _ in range(3):
+    for _ in range(5):
 
-        valid, sphere_links, other_pairs = find_keepout_contacts(
-            robot
+        valid, sphere_links, rod_links, other_pairs = (
+            find_keepout_contacts(robot)
         )
 
         if valid:
             rospy.loginfo(
                 "Current state is collision-free with the "
-                "keep-out sphere in place."
+                "keep-out sphere and support rod in place."
             )
             return True
 
@@ -535,14 +547,22 @@ def ensure_state_clear_of_keepout(robot):
             allow_keepout_collisions(sphere_links)
             continue
 
+        if rod_links:
+            rospy.logerr(
+                "Links in collision with the support rod: %s. "
+                "Adjust the start pose or the radius.",
+                ", ".join(rod_links)
+            )
+            return False
+
         rospy.logerr(
             "Current state is in collision for reasons unrelated "
-            "to the keep-out sphere: %s",
+            "to the keep-out sphere or the rod: %s",
             "; ".join(other_pairs) if other_pairs else "unknown"
         )
         return False
 
-    valid, _, _ = find_keepout_contacts(robot)
+    valid, _, _, _ = find_keepout_contacts(robot)
     return valid
 
 
@@ -826,9 +846,13 @@ def main():
         NUMBER_OF_POINTS
     )
 
+    # Per requirement: the hand/phone keeps the SAME orientation
+    # (fixed relative to the world) at the start pose and at every
+    # waypoint. Set _track_object:=true to rotate the camera so it
+    # aims at the object instead.
     track_object = rospy.get_param(
         "~track_object",
-        True
+        False
     )
 
     object_radius = rospy.get_param(
@@ -1076,13 +1100,6 @@ def main():
 
         try:
             allow_keepout_collisions(keepout_ignored_links)
-
-            if not ensure_state_clear_of_keepout(robot):
-                rospy.logerr(
-                    "The current state is still considered in "
-                    "collision - planning will fail. Use "
-                    "_object_radius:=0 to disable the sphere."
-                )
         except Exception as error:
             rospy.logerr(
                 "Unable to update the collision matrix: %s. "
@@ -1095,6 +1112,21 @@ def main():
         rospy.logwarn(
             "Keep-out sphere disabled (_object_radius <= 0)."
         )
+
+    if rod_radius > 0.0 or object_radius > 0.0:
+        try:
+            if not ensure_state_clear(robot):
+                rospy.logerr(
+                    "The current state is still considered in "
+                    "collision - planning will fail. Use "
+                    "_object_radius:=0 / _rod_radius:=0 to disable "
+                    "the obstacles."
+                )
+        except Exception as error:
+            rospy.logerr(
+                "Unable to verify the state validity: %s",
+                str(error)
+            )
 
     try:
         waypoints = create_arc_waypoints(
