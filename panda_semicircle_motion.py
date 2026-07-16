@@ -86,6 +86,14 @@ KEEPOUT_OBJECT_NAME = "object_keepout"
 ROD_OBJECT_NAME = "support_rod"
 SUPPORT_ROD_RADIUS = 0.005
 
+# Distance from the flange (the frame MoveIt controls) down to the
+# phone camera lens, along the pointing axis. The object is placed
+# 'camera_offset + radius' below the flange so the LENS - not the
+# flange - keeps 'radius' to the object, and the hand (which extends
+# about 10.5 cm below the flange) clears the object and the rod.
+# Measure and update once the phone is mounted.
+CAMERA_OFFSET_METERS = 0.10
+
 POSE_LOG_HEADER = [
     "waypoint",
     "angle_deg",
@@ -135,16 +143,17 @@ def load_joint_position(file_path):
     return values.tolist()
 
 
-def compute_sphere_center(start_pose, radius):
+def compute_sphere_center(start_pose, radius, camera_offset):
     """
-    The object (sphere center) sits at distance 'radius' straight
-    BELOW the starting camera position: the camera starts looking
-    down at it, and the support rod continues below it to the
-    ground.
+    The object (sphere center) sits straight BELOW the starting
+    flange position, at distance 'camera_offset + radius': the
+    camera lens (camera_offset below the flange) starts at exactly
+    'radius' from the object, looking down at it, and the support
+    rod continues below the object to the ground.
     """
 
     center = copy.deepcopy(start_pose.position)
-    center.z = start_pose.position.z - radius
+    center.z = start_pose.position.z - radius - camera_offset
 
     return center
 
@@ -880,14 +889,23 @@ def main():
         0.55
     )
 
+    camera_offset = rospy.get_param(
+        "~camera_offset",
+        CAMERA_OFFSET_METERS
+    )
+
     output_file = rospy.get_param(
         "~output_file",
         ""
     )
 
     if not output_file:
-        output_file = "arc_poses_{}.csv".format(
-            datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # By default the poses are saved next to this script.
+        output_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "arc_poses_{}.csv".format(
+                datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            )
         )
 
     rospy.loginfo("Joint file: %s", joint_file)
@@ -907,6 +925,12 @@ def main():
     rospy.loginfo(
         "Object height above the ground: %.3f m",
         object_height
+    )
+    rospy.loginfo(
+        "Camera lens offset below the flange: %.3f m "
+        "(object placed %.3f m below the flange)",
+        camera_offset,
+        camera_offset + radius
     )
     rospy.loginfo(
         "Output file for joint values and poses: %s",
@@ -1066,15 +1090,20 @@ def main():
     # The start pose is recorded as waypoint 0 at angle 0.
     log_current_pose(log_handle, log_writer, move_group, 0, 0.0)
 
-    sphere_center = compute_sphere_center(start_pose, radius)
+    sphere_center = compute_sphere_center(
+        start_pose,
+        radius,
+        camera_offset
+    )
 
     rospy.loginfo(
         "Object (sphere center): x=%.6f, y=%.6f, z=%.6f - "
-        "camera-object distance %.4f m",
+        "lens-object distance %.4f m (flange-object %.4f m)",
         sphere_center.x,
         sphere_center.y,
         sphere_center.z,
-        radius
+        radius,
+        radius + camera_offset
     )
 
     if rod_radius > 0.0:

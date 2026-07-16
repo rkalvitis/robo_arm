@@ -35,6 +35,14 @@ distance**:
   collision-checked at **full height** (an earlier auto-trim fallback was removed after the
   start joints were updated — if the rod blocks a waypoint, the fix is the start pose or the
   radius, not the model).
+- **Camera offset (`_camera_offset`, default 0.10 m):** the frame MoveIt controls is the
+  flange, but the phone lens sits ~10 cm lower on the hand. The object is therefore placed
+  `camera_offset + radius` below the flange — the **lens** keeps `radius` to the object, and
+  the hand no longer envelops the object/rod (which is exactly what failed on 2026-07-16:
+  at `_radius:=0.05` the object sat 5 cm below the flange, inside the physical hand, and
+  `panda_hand` collided with the rod at the start state). Measure the real offset once the
+  phone is mounted. With fixed world orientation the lens-object distance stays exactly
+  `radius` at every stop.
 - **Pose recording:** every run writes a CSV (`_output_file`, default
   `arc_poses_<timestamp>.csv`) with one row per stop — waypoint index, arc angle, the 7 joint
   values, end-effector position, and orientation quaternion — flushed after each stop, for

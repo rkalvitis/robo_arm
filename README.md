@@ -65,7 +65,8 @@ All are private ROS params (`_name:=value`):
 | `_keepout_ignored_links` | hand + finger links incl. `*_sc` capsule variants | Links allowed to touch the keep-out sphere (the hand carries the camera and must get that close); the rest of the arm is still kept out. The script also auto-detects and exempts (with a warning) any link still in contact with the sphere at the start pose |
 | `_rod_radius` | `0.005` (m) | Radius of the collision cylinder for the object's **support rod** (real rod is 2 mm; default includes a 3 mm margin). Vertical, from the ground to the object; **no link is exempt from it**. `0` disables |
 | `_object_height` | `0.55` (m) | Height of the object above the **ground** = length of the support rod (the rod hangs that far below the object in the planning scene, always at full height) |
-| `_output_file` | `arc_poses_<date>_<time>.csv` | CSV file recording, for the start pose and every waypoint reached: the 7 joint values, end-effector position, and orientation quaternion. Written incrementally, so an aborted run keeps everything up to the failure |
+| `_camera_offset` | `0.10` (m) | Flange → phone-lens distance along the pointing axis. The object is placed `camera_offset + radius` below the flange, so the **lens** keeps `radius` to the object and the hand (~10.5 cm long) clears the object and rod. **Measure and set once the phone is mounted** |
+| `_output_file` | `arc_poses_<date>_<time>.csv` **next to the script** (`src/panda_moveit_ctrl/scripts/`) | CSV file recording, for the start pose and every waypoint reached: the 7 joint values, end-effector position, and orientation quaternion. Written incrementally, so an aborted run keeps everything up to the failure. A relative path given explicitly is resolved against the terminal's current directory |
 
 Example with custom arc:
 
