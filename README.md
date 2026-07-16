@@ -60,7 +60,7 @@ All are private ROS params (`_name:=value`):
 | `_arc_degrees` | `60.0` | Arc sweep angle |
 | `_number_of_points` | `9` | Number of waypoints (photo poses) along the arc |
 | `_wait_between_points` | `2.0` (s) | Pause at each waypoint |
-| `_track_object` | `false` | `false` = hand/phone orientation stays **fixed relative to the world** (identical to the initial pose at every waypoint). `true` = rotate the camera along the arc so it always aims at the object |
+| `_track_object` | `true` | `true` = the hand rotates along the arc so the camera **always faces the object** (no roll — photo rotation stays consistent); the flange orbits at `radius + camera_offset` so the lens keeps `radius`. `false` = orientation frozen relative to the world (tested 2026-07-16: far waypoints become physically unreachable, object leaves the frame) |
 | `_object_radius` | `0.5 × _radius` (m) | Radius of the keep-out collision sphere around the object. **A value in meters** (the 0.5 is a ratio, only used for the default). `0` disables it; must be smaller than `_radius` |
 | `_keepout_ignored_links` | hand + finger links incl. `*_sc` capsule variants | Links allowed to touch the keep-out sphere (the hand carries the camera and must get that close); the rest of the arm is still kept out. The script also auto-detects and exempts (with a warning) any link still in contact with the sphere at the start pose |
 | `_rod_radius` | `0.005` (m) | Radius of the collision cylinder for the object's **support rod** (real rod is 2 mm; default includes a 3 mm margin). Vertical, from the ground to the object; **no link is exempt from it**. `0` disables |

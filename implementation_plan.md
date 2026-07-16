@@ -21,7 +21,11 @@ distance**:
 - The arc has **9 photo poses**, evenly spaced. The robot stops at each one; a photo is taken
   while stationary.
 - The **camera must aim at the object at every pose** (end-effector orientation rotates along
-  the arc so the object stays centered in frame).
+  the arc so the object stays centered in frame). Confirmed by testing on 2026-07-16: a fixed
+  world orientation was tried and rejected — the far waypoints become physically unreachable
+  (waypoint 8 needed 32 s of planning, waypoint 9 impossible) and the object leaves the frame.
+  Tracking adds no roll, so the photos' rotation stays consistent. With tracking, the flange
+  orbits at `radius + camera_offset`; the lens stays at `radius` from the object.
 - The sphere center is defined from the **start pose + the given radius**: the object is placed
   at distance `r` **straight below** the starting camera position (the hand's start is the
   highest point of the whole trajectory).

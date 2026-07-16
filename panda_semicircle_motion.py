@@ -186,8 +186,10 @@ def create_arc_waypoints(
         number_of_points,
         track_object):
     """
-    Generates an arc in the Y-Z plane, centered on the object,
-    which sits at distance 'radius' straight below the start pose.
+    Generates an arc in the Y-Z plane for the FLANGE, orbiting the
+    object at distance 'radius' (the flange orbit radius: the lens
+    radius plus the camera offset when tracking, the lens radius
+    alone when the orientation is frozen).
 
     +Y = right
     +Z = up
@@ -855,13 +857,14 @@ def main():
         NUMBER_OF_POINTS
     )
 
-    # Per requirement: the hand/phone keeps the SAME orientation
-    # (fixed relative to the world) at the start pose and at every
-    # waypoint. Set _track_object:=true to rotate the camera so it
-    # aims at the object instead.
+    # The hand rotates along the arc so the camera always faces the
+    # object (confirmed after testing: a fixed world orientation
+    # makes the far waypoints physically unreachable). The camera
+    # never rolls, so the photos' rotation stays consistent.
+    # _track_object:=false keeps the orientation frozen instead.
     track_object = rospy.get_param(
         "~track_object",
-        False
+        True
     )
 
     object_radius = rospy.get_param(
@@ -1106,6 +1109,16 @@ def main():
         radius + camera_offset
     )
 
+    # With tracking, the whole hand rotates around the object, so
+    # the FLANGE orbits at radius + camera_offset and the lens stays
+    # at 'radius'. With a frozen orientation the lens hangs at a
+    # constant offset below the flange, so the flange itself orbits
+    # at 'radius' (around a center camera_offset above the object).
+    if track_object:
+        arc_radius = radius + camera_offset
+    else:
+        arc_radius = radius
+
     if rod_radius > 0.0:
         add_support_rod(
             scene,
@@ -1160,7 +1173,7 @@ def main():
     try:
         waypoints = create_arc_waypoints(
             start_pose=start_pose,
-            radius=radius,
+            radius=arc_radius,
             arc_degrees=arc_degrees,
             number_of_points=number_of_points,
             track_object=track_object
