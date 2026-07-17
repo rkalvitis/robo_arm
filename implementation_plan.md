@@ -39,32 +39,75 @@ distance**:
   collision-checked at **full height** (an earlier auto-trim fallback was removed after the
   start joints were updated — if the rod blocks a waypoint, the fix is the start pose or the
   radius, not the model).
-- **Camera offset (`_camera_offset`, default 0.10 m):** the frame MoveIt controls is the
-  flange, but the phone lens sits ~10 cm lower on the hand. The object is therefore placed
-  `camera_offset + radius` below the flange — the **lens** keeps `radius` to the object, and
-  the hand no longer envelops the object/rod (which is exactly what failed on 2026-07-16:
-  at `_radius:=0.05` the object sat 5 cm below the flange, inside the physical hand, and
-  `panda_hand` collided with the rod at the start state). Measure the real offset once the
-  phone is mounted. With fixed world orientation the lens-object distance stays exactly
-  `radius` at every stop.
+- **Lens transform (`_lens_xyz` / `_lens_axis`, flange frame; supersedes the scalar
+  `_camera_offset` on 2026-07-17):** the frame MoveIt controls is the flange, but the photos
+  are taken by the iPhone 15 Pro **ultra-wide lens**, which sits at
+  `(-0.0227, -0.0680, 0.1160)` m in the `panda_link8` frame and looks along
+  `(-0.70711, 0, 0.70711)` — the phone lies at 45° in the holder cradle. Both values were
+  measured from `Mount+phone.stl` (lens-ring circle fits, ±0.7 mm). The object is placed
+  `radius` from the lens **along the camera axis**, and each waypoint is a rigid rotation of
+  the whole start pose about the object center around the world X axis, so the lens (not the
+  flange) keeps exactly `radius` and stays aimed with zero roll (verified numerically:
+  distance error <1e-12 m, aim error <1e-5 deg over a 170° arc; the math reduces exactly to
+  the previous formula when the lens lies on the flange z axis). `_lens_xyz:=''` restores
+  the legacy scalar-offset behavior. **Consequence of the 45° cradle: the start joints must
+  pitch the flange 45° so the camera starts looking straight down** — the script warns above
+  5° error. The lens world position is now logged as three extra CSV columns.
 - **Pose recording:** every run writes a CSV (`_output_file`, default
   `arc_poses_<timestamp>.csv`) with one row per stop — waypoint index, arc angle, the 7 joint
   values, end-effector position, and orientation quaternion — flushed after each stop, for
   matching photos to exact camera poses.
+
+## Custom phone-holder hand (added 2026-07-17)
+
+The Franka gripper is **physically replaced** by the 3D-printed phone holder
+(`franka_phone_holder_merged_backface.stl`, modeled in millimeters). Integration is
+script-level (plan A): `panda_semicircle_motion.py` loads the binary STL without pyassimp,
+scales it to meters, and attaches it to `panda_link8` as an `AttachedCollisionObject`
+(published on `/attached_collision_object`), so MoveIt collision-checks the true holder
+geometry against the support rod and the arm. The attachment happens before any planning,
+in dry-run mode too (for RViz verification), and the holder is auto-exempted from the
+keep-out sphere like the old hand links.
+
+Alignment, derived from the mesh's DIN ISO 9409-1-A50 mounting face and the Franka Hand
+mesh/manual (drawing 5.3):
+
+| Quantity | Value | Source |
+|---|---|---|
+| x/y offset | 0 | mesh Ø63 rim centered on origin |
+| z offset | −8 mm | mounting face at z = +8 mm in mesh coords |
+| yaw | −90° | mesh pin hole at +90° (mesh +Y); flange pin on +X of `panda_link8` (Franka Hand mesh: pin at +45° in hand frame, hand mounts at −45°) |
+
+Operational consequences:
+- `franka_control.launch` must run with **`load_gripper:=false`** (otherwise MoveIt plans
+  around a phantom gripper overlapping the holder).
+- `panda_moveit_ctrl_server_node.py` updated: `load_gripper=False`, `ee="panda_link8"`.
+- `panda_moveit_ctrl_node.py` (gripper open/close test) is obsolete — there is no gripper.
+- The holder mesh is 52 k triangles; if planning gets slow, decimate a copy and point
+  `_holder_mesh` at it.
+
+`Mount+phone.stl` (same coordinate frame) adds the iPhone 15 Pro: it sits at **45° in the
+cradle**, and the three camera lens rings were located by circle fitting (spread ≤0.7 mm).
+In the flange frame (mm): ultra-wide (−22.7, −68.0, 116.0), main (−22.7, −87.2, 116.0),
+telephoto (−35.4, −77.5, 103.3); camera axis (−0.70711, 0, 0.70711). Ring identification:
+bump seen from the back in portrait = left column top/bottom + right middle; on the 15 Pro
+ultra-wide is bottom-left (verify once by covering lenses at 0.5×). Note the tabulated point
+is the **lens-ring top surface**; the optical entrance pupil sits a couple of mm behind it —
+at r = 3–5 cm consider calibrating `_radius` against a test photo.
 
 ## Current implementation status
 
 All development-phase features are **implemented and verified in demo-mode simulation**
 (2026-07-15: full run, 90° arc, r=0.05 m, 12 waypoints — all reached; logged positions match
 the planned arc to <1 mm and the final orientation matches the expected 90° rotation exactly).
-Not yet run on the real robot.
+The lens-based arc math was verified numerically offline (2026-07-17). Not yet run on the
+real robot.
 
-**Next step before real-object runs — camera offset:** the radius is currently measured from
-the flange, so the sphere center at 3–5 cm sits *inside the gripper envelope* (that's why the
-wrist link needed a keep-out exemption). Once the phone is mounted, measure flange→lens
-distance and add a `_camera_offset` param: sphere center goes at `offset + radius` from the
-flange, keeping the *lens* at the desired distance. Until then, do not place a real object at
-the sphere position shown in RViz.
+**Next step before real-object runs — start pose:** `joint_start.csv` predates the phone
+holder and aims the flange z axis down; with the 45° cradle the flange must be pitched 45°
+so the **camera** looks down. Record a new start configuration (freedrive with the phone
+aiming at the floor, then save the joints); the script warns if the camera axis is >5° off
+vertical.
 
 | | Status |
 |---|---|
@@ -116,9 +159,11 @@ Safety defaults: velocity and acceleration scaled to **5 %**, and **nothing move
 | File | Role |
 |---|---|
 | `panda_semicircle_motion.py` | Main script: start pose from CSV → 8-waypoint arc, pausing at each point |
-| `panda_moveit_ctrl_server_node.py` | Starts `PandaRobotService` — ROS service server for robot/gripper control (vel/acc 0.4, `panda_hand` end-effector, gripper loaded) |
-| `panda_moveit_ctrl_node.py` | Standalone test node: opens and closes the gripper (not part of the main 3-terminal flow) |
-| `joint_start.csv` | Single line, 7 comma-separated joint values (rad) — the start configuration |
+| `panda_moveit_ctrl_server_node.py` | Starts `PandaRobotService` — ROS service server for robot control (vel/acc 0.4, `panda_link8` end-effector, no gripper) |
+| `panda_moveit_ctrl_node.py` | Standalone gripper test node — obsolete since the phone holder replaced the gripper |
+| `joint_start.csv` | Single line, 7 comma-separated joint values (rad) — the start configuration. **Needs re-recording for the 45° camera cradle** |
+| `franka_phone_holder_merged_backface.stl` | Phone-holder hand (mm), attached to `panda_link8` as collision geometry |
+| `Mount+phone.stl` | Holder + iPhone 15 Pro assembly (mm, same frame) — source of the lens/camera measurements, not used at runtime |
 
 ## Notes / caveats
 

@@ -7,15 +7,21 @@ Arc motion for Franka Emika Panda.
 The script:
 
 1. reads an initial joint configuration from a CSV file;
+1b. attaches the custom phone-holder mesh to the flange as
+    collision geometry (the holder replaces the Franka gripper -
+    launch franka_control.launch with load_gripper:=false);
 2. moves the robot to the initial configuration;
 3. reads the Cartesian pose that was reached;
-4. places the object (sphere center) at distance 'radius' straight
-   BELOW that pose - the camera starts looking down at it;
+4. computes the phone-lens position from that pose and the lens
+   transform (_lens_xyz/_lens_axis, flange frame) and places the
+   object (sphere center) at distance 'radius' from the LENS along
+   the camera axis - straight below it when the start pose aims
+   the camera down;
 5. generates waypoints along an arc in the Y-Z plane, centered on
    the object, descending from above toward the +Y side, so the
-   camera-object distance stays constant;
-6. rotates the end-effector at each waypoint so the camera keeps
-   aiming at the object;
+   lens-object distance stays constant;
+6. rotates the whole pose rigidly at each waypoint so the camera
+   keeps aiming at the object;
 7. adds the object's sphere to the planning scene as a keep-out
    region so no part of the arm can plan through it;
 8. waits 2 seconds between one waypoint and the next.
@@ -32,20 +38,28 @@ import csv
 import datetime
 import math
 import os
+import struct
 import sys
 
 import numpy as np
 import rospy
 import moveit_commander
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Point, Pose, PoseStamped
 from moveit_msgs.msg import (
     AllowedCollisionEntry,
+    AttachedCollisionObject,
+    CollisionObject,
     PlanningScene,
     PlanningSceneComponents
 )
+from shape_msgs.msg import Mesh, MeshTriangle
 from moveit_msgs.srv import GetPlanningScene, GetStateValidity
-from tf.transformations import quaternion_about_axis, quaternion_multiply
+from tf.transformations import (
+    quaternion_about_axis,
+    quaternion_matrix,
+    quaternion_multiply
+)
 
 
 PLANNING_GROUP = "panda_arm"
@@ -76,6 +90,10 @@ CARTESIAN_MIN_FRACTION = 0.999
 # this distance of the target, the waypoint is considered reached.
 REACHED_DISTANCE_TOLERANCE = 0.005
 
+# Same idea for the initial joint move: worst joint error (rad)
+# below which "failure" from the controller is treated as arrived.
+JOINT_REACHED_TOLERANCE = 0.01
+
 # Default keep-out sphere radius as a fraction of the arc radius.
 OBJECT_RADIUS_RATIO = 0.5
 
@@ -86,13 +104,27 @@ KEEPOUT_OBJECT_NAME = "object_keepout"
 ROD_OBJECT_NAME = "support_rod"
 SUPPORT_ROD_RADIUS = 0.005
 
-# Distance from the flange (the frame MoveIt controls) down to the
-# phone camera lens, along the pointing axis. The object is placed
-# 'camera_offset + radius' below the flange so the LENS - not the
-# flange - keeps 'radius' to the object, and the hand (which extends
-# about 10.5 cm below the flange) clears the object and the rod.
-# Measure and update once the phone is mounted.
+# Legacy scalar lens offset: distance from the flange down to the
+# lens along the flange z axis. Only used when _lens_xyz:='' is
+# passed explicitly; the mesh-measured lens transform below is the
+# default.
 CAMERA_OFFSET_METERS = 0.10
+
+# Ultra-wide lens of the iPhone 15 Pro in the phone holder, in the
+# panda_link8 (flange) frame, measured from Mount+phone.stl by
+# fitting the lens-ring circles of the camera bump (the phone sits
+# at 45 degrees in the cradle, camera bump toward the +Z end).
+# On the iPhone 15 Pro the ultra-wide is the BOTTOM-LEFT lens of
+# the bump (back view, portrait); main is top-left at link8
+# (-0.0227, -0.0872, 0.1160), telephoto at (-0.0354, -0.0775,
+# 0.1033). Verify which ring is the ultra-wide by covering the
+# lenses one at a time with the Camera app at 0.5x.
+LENS_XYZ_LINK8 = "-0.0227,-0.0680,0.1160"
+
+# Direction the camera looks, unit vector in the panda_link8 frame
+# (normal of the phone back): 45 degrees between the flange z axis
+# and -x.
+LENS_AXIS_LINK8 = "-0.70711,0.0,0.70711"
 
 POSE_LOG_HEADER = [
     "waypoint",
@@ -100,18 +132,51 @@ POSE_LOG_HEADER = [
     "joint1", "joint2", "joint3", "joint4",
     "joint5", "joint6", "joint7",
     "position_x", "position_y", "position_z",
-    "orientation_x", "orientation_y", "orientation_z", "orientation_w"
+    "orientation_x", "orientation_y", "orientation_z", "orientation_w",
+    "lens_x", "lens_y", "lens_z"
 ]
 
 # Links allowed to touch the keep-out sphere. The hand carries the
 # camera and must get within 'radius' of the object, so it cannot be
 # collision-checked against the sphere; the rest of the arm still is.
 # The *_sc links are the coarse capsule collision bodies that newer
-# panda_moveit_config versions add around the visible links.
+# panda_moveit_config versions add around the visible links. The
+# panda_hand/finger entries only exist while the URDF still loads
+# the gripper; with the phone holder mounted they are simply absent.
 KEEPOUT_IGNORED_LINKS = (
     "panda_link8,panda_hand,panda_leftfinger,panda_rightfinger,"
-    "panda_hand_sc,panda_link7_sc,panda_link8_sc"
+    "panda_hand_sc,panda_link7_sc,panda_link8_sc,phone_holder"
 )
+
+# The custom phone-holder hand - it REPLACES the Franka gripper, so
+# launch franka_control.launch with load_gripper:=false. The mesh is
+# rigidly attached to the flange as a collision object so MoveIt
+# plans around the real holder geometry (the support rod especially).
+#
+# Alignment, derived from the mesh's DIN ISO 9409-1-A50 mounting
+# face (mesh coordinates, millimeters):
+#   - outer rim (diam. 63, the flange diameter) centered on the mesh
+#     origin -> no x/y offset, mesh z axis = flange axis;
+#   - mounting face at z = +8 -> HOLDER_Z_OFFSET = -0.008 puts it
+#     flush on the flange surface (= panda_link8 origin);
+#   - dowel-pin hole (diam. 6, on the diam. 50 pitch circle) at +90
+#     deg = the mesh +Y axis. On the robot the flange pin lies on
+#     the +X axis of panda_link8 (Franka Hand mesh: pin at +45 deg
+#     in the hand frame, hand mounted at yaw -45 deg), so the holder
+#     mounts at HOLDER_YAW_DEG = -90.
+HOLDER_OBJECT_NAME = "phone_holder"
+HOLDER_MESH_FILE = "franka_phone_holder_merged_backface.stl"
+HOLDER_ATTACH_LINK = "panda_link8"
+HOLDER_MESH_SCALE = 0.001  # the STL is modeled in millimeters
+HOLDER_Z_OFFSET = -0.008
+HOLDER_YAW_DEG = -90.0
+
+# Robot links the holder is allowed to touch (it is bolted to the
+# flange). Links absent from the URDF are ignored by MoveIt.
+HOLDER_TOUCH_LINKS = [
+    "panda_link7", "panda_link8",
+    "panda_link7_sc", "panda_link8_sc"
+]
 
 
 def load_joint_position(file_path):
@@ -143,19 +208,69 @@ def load_joint_position(file_path):
     return values.tolist()
 
 
-def compute_sphere_center(start_pose, radius, camera_offset):
+def parse_vector3(text, name):
     """
-    The object (sphere center) sits straight BELOW the starting
-    flange position, at distance 'camera_offset + radius': the
-    camera lens (camera_offset below the flange) starts at exactly
-    'radius' from the object, looking down at it, and the support
-    rod continues below the object to the ground.
+    Parses a 'x,y,z' string into a list of 3 floats.
     """
 
-    center = copy.deepcopy(start_pose.position)
-    center.z = start_pose.position.z - radius - camera_offset
+    values = [float(part) for part in text.split(",")]
 
-    return center
+    if len(values) != 3:
+        raise ValueError(
+            "{} must contain exactly 3 comma-separated values, "
+            "got: {}".format(name, text)
+        )
+
+    return values
+
+
+def rotate_about_x(vector, angle):
+    """
+    Rotates a 3D vector about the world X axis.
+    """
+
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+
+    return np.array([
+        vector[0],
+        vector[1] * cos_a - vector[2] * sin_a,
+        vector[1] * sin_a + vector[2] * cos_a
+    ])
+
+
+def compute_camera_geometry(start_pose, lens_xyz, lens_axis, radius):
+    """
+    Computes, in world coordinates, the starting lens position, the
+    direction the camera looks, and the object (sphere center):
+    the object is placed at distance 'radius' from the LENS, along
+    the camera axis. lens_xyz / lens_axis are given in the flange
+    (panda_link8) frame.
+    """
+
+    orientation = start_pose.orientation
+
+    rotation = quaternion_matrix([
+        orientation.x,
+        orientation.y,
+        orientation.z,
+        orientation.w
+    ])[:3, :3]
+
+    flange_position = np.array([
+        start_pose.position.x,
+        start_pose.position.y,
+        start_pose.position.z
+    ])
+
+    lens_position = flange_position + rotation.dot(lens_xyz)
+
+    axis_world = rotation.dot(lens_axis)
+    axis_world = axis_world / np.linalg.norm(axis_world)
+
+    center = lens_position + radius * axis_world
+
+    return lens_position, axis_world, center
 
 
 def compute_aim_orientation(start_orientation, theta):
@@ -181,44 +296,47 @@ def compute_aim_orientation(start_orientation, theta):
 
 def create_arc_waypoints(
         start_pose,
-        radius,
+        center,
+        lens_start,
         arc_degrees,
         number_of_points,
         track_object):
     """
-    Generates an arc in the Y-Z plane for the FLANGE, orbiting the
-    object at distance 'radius' (the flange orbit radius: the lens
-    radius plus the camera offset when tracking, the lens radius
-    alone when the orientation is frozen).
+    Generates flange waypoints so the LENS orbits the object
+    (sphere center) at constant distance, sweeping an arc in the
+    world Y-Z plane.
 
     +Y = right
     +Z = up
 
-    The camera starts at the top of the sphere looking straight
-    down at the object, then sweeps toward +Y, descending along the
-    sphere. At theta = 90 degrees it looks at the object
-    horizontally from the side; beyond that it goes below the
-    object's height, toward the support rod and the ground.
+    With track_object=True the whole start pose is rotated rigidly
+    about the object center around the world X axis by -theta:
+    the lens keeps its exact starting distance and stays aimed at
+    the object at every waypoint, whatever its offset from the
+    flange, and the camera never rolls. The camera starts looking
+    at the object (straight down at the start pose), sweeps toward
+    +Y descending along the sphere; at 90 degrees it looks at the
+    object from the side, beyond that from underneath.
 
-    Formula (deltas from the start pose):
-
-        delta_y = r * sin(theta)
-        delta_z = r * (cos(theta) - 1)
-
-    theta ranges from 0 to arc_degrees.
-
-    If track_object is True, the end-effector orientation rotates
-    along the arc so the camera keeps aiming at the sphere center;
-    otherwise the orientation remains unchanged.
+    With track_object=False the orientation stays frozen: the LENS
+    still orbits the center, and the flange keeps its constant
+    world offset from the lens.
     """
-
-    if radius <= 0.0:
-        raise ValueError("The radius must be greater than zero.")
 
     if number_of_points <= 0:
         raise ValueError(
             "The number of waypoints must be greater than zero."
         )
+
+    flange_start = np.array([
+        start_pose.position.x,
+        start_pose.position.y,
+        start_pose.position.z
+    ])
+
+    delta_flange = flange_start - center
+    delta_lens = lens_start - center
+    lens_offset_world = lens_start - flange_start
 
     waypoints = []
 
@@ -235,14 +353,25 @@ def create_arc_waypoints(
 
         theta = total_angle * float(index) / float(number_of_points)
 
-        delta_y = radius * math.sin(theta)
-        delta_z = radius * (math.cos(theta) - 1.0)
+        if track_object:
+            # Rotate the whole pose (flange position + orientation)
+            # about the object center: the rigidly-attached lens
+            # follows, staying at 'radius' and aimed at the object.
+            position = center + rotate_about_x(delta_flange, -theta)
+        else:
+            # Frozen orientation: the lens orbits the center, and
+            # the flange keeps its constant world offset from it.
+            position = (
+                center
+                + rotate_about_x(delta_lens, -theta)
+                - lens_offset_world
+            )
 
         waypoint = copy.deepcopy(start_pose)
 
-        waypoint.position.x = start_pose.position.x
-        waypoint.position.y = start_pose.position.y + delta_y
-        waypoint.position.z = start_pose.position.z + delta_z
+        waypoint.position.x = position[0]
+        waypoint.position.y = position[1]
+        waypoint.position.z = position[2]
 
         if track_object:
             orientation = compute_aim_orientation(
@@ -259,13 +388,11 @@ def create_arc_waypoints(
 
         rospy.loginfo(
             "Waypoint %d/%d - angle %.2f deg - "
-            "delta Y %.6f m - delta Z %.6f m - "
-            "position Y %.6f - position Z %.6f",
+            "position x %.6f - y %.6f - z %.6f",
             index,
             number_of_points,
             math.degrees(theta),
-            delta_y,
-            delta_z,
+            waypoint.position.x,
             waypoint.position.y,
             waypoint.position.z
         )
@@ -358,6 +485,159 @@ def add_support_rod(scene, move_group, center, rod_radius,
     )
 
 
+def load_stl_mesh(file_path, scale):
+    """
+    Loads a binary STL file into a shape_msgs/Mesh message, scaling
+    the vertices (the holder is modeled in millimeters -> 0.001).
+    Duplicate vertices are merged so the message stays compact.
+    """
+
+    file_path = os.path.abspath(os.path.expanduser(file_path))
+
+    if not os.path.isfile(file_path):
+        raise IOError(
+            "Mesh file not found: {}".format(file_path)
+        )
+
+    file_size = os.path.getsize(file_path)
+
+    mesh = Mesh()
+    vertex_index = {}
+
+    with open(file_path, "rb") as handle:
+
+        handle.read(80)
+        (triangle_count,) = struct.unpack("<I", handle.read(4))
+
+        if file_size != 84 + triangle_count * 50:
+            raise ValueError(
+                "{} is not a binary STL file".format(file_path)
+            )
+
+        for _ in range(triangle_count):
+
+            values = struct.unpack("<12fH", handle.read(50))
+
+            indices = []
+
+            for vertex in range(3):
+                point = tuple(
+                    round(values[3 + 3 * vertex + axis] * scale, 6)
+                    for axis in range(3)
+                )
+
+                index = vertex_index.get(point)
+
+                if index is None:
+                    index = len(mesh.vertices)
+                    vertex_index[point] = index
+                    mesh.vertices.append(Point(*point))
+
+                indices.append(index)
+
+            if len(set(indices)) < 3:
+                # Degenerate triangle (collapsed by the merge).
+                continue
+
+            mesh.triangles.append(
+                MeshTriangle(vertex_indices=indices)
+            )
+
+    return mesh
+
+
+def attach_phone_holder(scene, mesh_file, z_offset, yaw_deg):
+    """
+    Rigidly attaches the phone-holder mesh to the flange as an
+    AttachedCollisionObject, so MoveIt collision-checks the real
+    holder geometry against the support rod and the rest of the arm.
+
+    Publishing on /attached_collision_object avoids the pyassimp
+    dependency of PlanningSceneInterface.attach_mesh.
+    """
+
+    mesh = load_stl_mesh(mesh_file, HOLDER_MESH_SCALE)
+
+    holder_pose = Pose()
+    holder_pose.position.z = z_offset
+
+    rotation = quaternion_about_axis(
+        math.radians(yaw_deg),
+        (0.0, 0.0, 1.0)
+    )
+
+    holder_pose.orientation.x = rotation[0]
+    holder_pose.orientation.y = rotation[1]
+    holder_pose.orientation.z = rotation[2]
+    holder_pose.orientation.w = rotation[3]
+
+    collision_object = CollisionObject()
+    collision_object.header.frame_id = HOLDER_ATTACH_LINK
+    collision_object.id = HOLDER_OBJECT_NAME
+    collision_object.meshes = [mesh]
+    collision_object.mesh_poses = [holder_pose]
+    collision_object.operation = CollisionObject.ADD
+
+    # Newer message versions add an object-level pose on top of the
+    # mesh poses; it must be a valid identity, not all zeros.
+    if hasattr(collision_object, "pose"):
+        collision_object.pose.orientation.w = 1.0
+
+    attached = AttachedCollisionObject()
+    attached.link_name = HOLDER_ATTACH_LINK
+    attached.object = collision_object
+    attached.touch_links = HOLDER_TOUCH_LINKS
+
+    publisher = rospy.Publisher(
+        "/attached_collision_object",
+        AttachedCollisionObject,
+        queue_size=2,
+        latch=True
+    )
+
+    rospy.sleep(0.5)
+
+    # Detach any stale copy left over from a previous run (harmless
+    # move_group warning if there is none) and remove the world
+    # object the detach turns it into.
+    detach = AttachedCollisionObject()
+    detach.object.id = HOLDER_OBJECT_NAME
+    detach.object.operation = CollisionObject.REMOVE
+
+    publisher.publish(detach)
+    rospy.sleep(0.5)
+
+    scene.remove_world_object(HOLDER_OBJECT_NAME)
+    rospy.sleep(0.5)
+
+    publisher.publish(attached)
+    rospy.sleep(1.0)
+
+    try:
+        confirmed = HOLDER_OBJECT_NAME in scene.get_attached_objects(
+            [HOLDER_OBJECT_NAME]
+        )
+    except Exception:
+        # Older moveit_commander versions cannot report attached
+        # objects - trust the latched publication.
+        confirmed = True
+
+    if not confirmed:
+        raise RuntimeError(
+            "move_group did not confirm the phone holder attachment"
+        )
+
+    rospy.loginfo(
+        "Phone holder attached to %s: %s (%d triangles), "
+        "z offset %.4f m, yaw %.1f deg",
+        HOLDER_ATTACH_LINK,
+        mesh_file,
+        len(mesh.triangles),
+        z_offset,
+        yaw_deg
+    )
+
+
 def open_pose_log(file_path):
     """
     Opens the CSV output file and writes the header. Rows are
@@ -377,14 +657,28 @@ def open_pose_log(file_path):
     return handle, writer
 
 
-def log_current_pose(handle, writer, move_group, waypoint, angle_deg):
+def log_current_pose(handle, writer, move_group, waypoint, angle_deg,
+                     lens_xyz):
     """
-    Appends the current joint values and end-effector pose to the
-    output file.
+    Appends the current joint values, end-effector pose and world
+    lens position to the output file.
     """
 
     joints = move_group.get_current_joint_values()
     pose = move_group.get_current_pose().pose
+
+    rotation = quaternion_matrix([
+        pose.orientation.x,
+        pose.orientation.y,
+        pose.orientation.z,
+        pose.orientation.w
+    ])[:3, :3]
+
+    lens_world = np.array([
+        pose.position.x,
+        pose.position.y,
+        pose.position.z
+    ]) + rotation.dot(lens_xyz)
 
     writer.writerow(
         [waypoint, "{:.4f}".format(angle_deg)]
@@ -396,10 +690,37 @@ def log_current_pose(handle, writer, move_group, waypoint, angle_deg):
             pose.orientation.x,
             pose.orientation.y,
             pose.orientation.z,
-            pose.orientation.w)]
+            pose.orientation.w,
+            lens_world[0],
+            lens_world[1],
+            lens_world[2])]
     )
 
     handle.flush()
+
+
+def ensure_acm_entry(acm, name):
+    """
+    Returns the index of 'name' in the Allowed Collision Matrix,
+    adding a new all-disabled entry if it is missing. Bodies that
+    are not robot links - the keep-out sphere, or the attached
+    phone holder - have no entry until one is created.
+    """
+
+    if name not in acm.entry_names:
+
+        acm.entry_names.append(name)
+
+        for entry in acm.entry_values:
+            entry.enabled.append(False)
+
+        acm.entry_values.append(
+            AllowedCollisionEntry(
+                enabled=[False] * len(acm.entry_names)
+            )
+        )
+
+    return acm.entry_names.index(name)
 
 
 def allow_keepout_collisions(ignored_links):
@@ -423,32 +744,11 @@ def allow_keepout_collisions(ignored_links):
 
     acm = get_scene(components).scene.allowed_collision_matrix
 
-    if KEEPOUT_OBJECT_NAME not in acm.entry_names:
-
-        acm.entry_names.append(KEEPOUT_OBJECT_NAME)
-
-        for entry in acm.entry_values:
-            entry.enabled.append(False)
-
-        acm.entry_values.append(
-            AllowedCollisionEntry(
-                enabled=[False] * len(acm.entry_names)
-            )
-        )
-
-    keepout_index = acm.entry_names.index(KEEPOUT_OBJECT_NAME)
+    keepout_index = ensure_acm_entry(acm, KEEPOUT_OBJECT_NAME)
 
     for link in ignored_links:
 
-        if link not in acm.entry_names:
-            rospy.logwarn(
-                "Link '%s' not found in the collision matrix. "
-                "Skipping.",
-                link
-            )
-            continue
-
-        link_index = acm.entry_names.index(link)
+        link_index = ensure_acm_entry(acm, link)
 
         acm.entry_values[link_index].enabled[keepout_index] = True
         acm.entry_values[keepout_index].enabled[link_index] = True
@@ -659,10 +959,41 @@ def move_to_joint_position(move_group, joint_position):
 
     move_group.set_joint_value_target(joint_position)
 
-    success = move_group.go(wait=True)
+    try:
+        success = move_group.go(wait=True)
+    except Exception as error:
+        rospy.logerr(
+            "Error while moving to the initial joint position: %s",
+            str(error)
+        )
+        success = False
 
     move_group.stop()
     move_group.clear_pose_targets()
+
+    if not success:
+        # The Franka controller sometimes reports failure (goal
+        # tolerance) even though the arm arrived - check the actual
+        # joint error before giving up.
+        current = move_group.get_current_joint_values()
+
+        max_error = max(
+            abs(value - target)
+            for value, target in zip(current, joint_position)
+        )
+
+        rospy.loginfo(
+            "Worst joint error after the reported failure: "
+            "%.4f rad",
+            max_error
+        )
+
+        if max_error <= JOINT_REACHED_TOLERANCE:
+            rospy.logwarn(
+                "Controller reported failure but the initial joint "
+                "position is within tolerance. Continuing."
+            )
+            success = True
 
     if not success:
         rospy.logerr(
@@ -897,6 +1228,63 @@ def main():
         CAMERA_OFFSET_METERS
     )
 
+    # Lens transform in the flange frame. The default is the
+    # ultra-wide lens of the iPhone 15 Pro measured from
+    # Mount+phone.stl; _lens_xyz:='' falls back to the legacy
+    # behavior (lens on the flange z axis at _camera_offset).
+    lens_xyz_text = rospy.get_param(
+        "~lens_xyz",
+        LENS_XYZ_LINK8
+    )
+
+    lens_axis_text = rospy.get_param(
+        "~lens_axis",
+        LENS_AXIS_LINK8
+    )
+
+    try:
+        if lens_xyz_text:
+            lens_xyz = np.array(
+                parse_vector3(lens_xyz_text, "_lens_xyz")
+            )
+            lens_axis = np.array(
+                parse_vector3(lens_axis_text, "_lens_axis")
+            )
+        else:
+            lens_xyz = np.array([0.0, 0.0, camera_offset])
+            lens_axis = np.array([0.0, 0.0, 1.0])
+    except ValueError as error:
+        rospy.logerr(
+            "Invalid lens parameter: %s",
+            str(error)
+        )
+
+        moveit_commander.roscpp_shutdown()
+        return 1
+
+    # Phone-holder mesh, attached to the flange as collision
+    # geometry. An empty value skips the attachment (only sensible
+    # while the Franka gripper is still mounted instead).
+    default_holder_mesh = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        HOLDER_MESH_FILE
+    )
+
+    holder_mesh = rospy.get_param(
+        "~holder_mesh",
+        default_holder_mesh
+    )
+
+    holder_z_offset = rospy.get_param(
+        "~holder_z_offset",
+        HOLDER_Z_OFFSET
+    )
+
+    holder_yaw_deg = rospy.get_param(
+        "~holder_yaw_deg",
+        HOLDER_YAW_DEG
+    )
+
     output_file = rospy.get_param(
         "~output_file",
         ""
@@ -930,10 +1318,16 @@ def main():
         object_height
     )
     rospy.loginfo(
-        "Camera lens offset below the flange: %.3f m "
-        "(object placed %.3f m below the flange)",
-        camera_offset,
-        camera_offset + radius
+        "Lens in the flange frame: position (%.4f, %.4f, %.4f) m, "
+        "camera axis (%.3f, %.3f, %.3f)",
+        lens_xyz[0], lens_xyz[1], lens_xyz[2],
+        lens_axis[0], lens_axis[1], lens_axis[2]
+    )
+    rospy.loginfo(
+        "Phone holder mesh: %s (z offset %.4f m, yaw %.1f deg)",
+        holder_mesh if holder_mesh else "disabled",
+        holder_z_offset,
+        holder_yaw_deg
     )
     rospy.loginfo(
         "Output file for joint values and poses: %s",
@@ -952,6 +1346,15 @@ def main():
             "will reject any waypoint that would touch the rod).",
             arc_degrees
         )
+
+    if radius <= 0.0:
+        rospy.logerr(
+            "The radius must be greater than zero, got %.4f m.",
+            radius
+        )
+
+        moveit_commander.roscpp_shutdown()
+        return 1
 
     if object_radius >= radius:
         rospy.logerr(
@@ -1027,6 +1430,34 @@ def main():
 
     rospy.sleep(2.0)
 
+    # Attach the phone holder before anything is planned - even the
+    # initial joint move must respect its geometry. Done in dry-run
+    # mode too, so RViz shows the attached mesh and the alignment
+    # can be checked against the real holder before executing.
+    if holder_mesh:
+        try:
+            attach_phone_holder(
+                scene,
+                holder_mesh,
+                holder_z_offset,
+                holder_yaw_deg
+            )
+        except Exception as error:
+            rospy.logerr(
+                "Unable to attach the phone holder: %s. Planning "
+                "would ignore the holder geometry - fix "
+                "_holder_mesh, or pass _holder_mesh:='' to skip "
+                "the attachment deliberately.",
+                str(error)
+            )
+
+            moveit_commander.roscpp_shutdown()
+            return 1
+    else:
+        rospy.logwarn(
+            "Phone holder attachment disabled (_holder_mesh:='')."
+        )
+
     current_joint_values = move_group.get_current_joint_values()
 
     if len(current_joint_values) != 7:
@@ -1056,6 +1487,13 @@ def main():
         "Check that the workspace is clear and "
         "that the emergency stop button is available."
     )
+
+    # Obstacles left over from a previous run persist in the
+    # move_group planning scene across script restarts - remove
+    # them before planning the move to the initial pose.
+    scene.remove_world_object(KEEPOUT_OBJECT_NAME)
+    scene.remove_world_object(ROD_OBJECT_NAME)
+    rospy.sleep(0.5)
 
     if not move_to_joint_position(
             move_group,
@@ -1091,33 +1529,60 @@ def main():
         return 1
 
     # The start pose is recorded as waypoint 0 at angle 0.
-    log_current_pose(log_handle, log_writer, move_group, 0, 0.0)
+    log_current_pose(
+        log_handle, log_writer, move_group, 0, 0.0, lens_xyz
+    )
 
-    sphere_center = compute_sphere_center(
-        start_pose,
-        radius,
-        camera_offset
+    lens_start, camera_axis_world, center_np = (
+        compute_camera_geometry(
+            start_pose,
+            lens_xyz,
+            lens_axis,
+            radius
+        )
+    )
+
+    sphere_center = Point(
+        center_np[0],
+        center_np[1],
+        center_np[2]
+    )
+
+    rospy.loginfo(
+        "Lens starts at x=%.6f, y=%.6f, z=%.6f looking along "
+        "(%.3f, %.3f, %.3f)",
+        lens_start[0], lens_start[1], lens_start[2],
+        camera_axis_world[0],
+        camera_axis_world[1],
+        camera_axis_world[2]
     )
 
     rospy.loginfo(
         "Object (sphere center): x=%.6f, y=%.6f, z=%.6f - "
-        "lens-object distance %.4f m (flange-object %.4f m)",
+        "lens-object distance %.4f m",
         sphere_center.x,
         sphere_center.y,
         sphere_center.z,
-        radius,
-        radius + camera_offset
+        radius
     )
 
-    # With tracking, the whole hand rotates around the object, so
-    # the FLANGE orbits at radius + camera_offset and the lens stays
-    # at 'radius'. With a frozen orientation the lens hangs at a
-    # constant offset below the flange, so the flange itself orbits
-    # at 'radius' (around a center camera_offset above the object).
-    if track_object:
-        arc_radius = radius + camera_offset
-    else:
-        arc_radius = radius
+    # The arc math assumes the camera starts looking straight down
+    # at the object (the start is the top of the sphere). With the
+    # 45-degree phone cradle this constrains the start joints: the
+    # flange must be pitched so the camera axis is vertical.
+    aim_error_deg = math.degrees(
+        math.acos(max(-1.0, min(1.0, -camera_axis_world[2])))
+    )
+
+    if aim_error_deg > 5.0:
+        rospy.logwarn(
+            "The camera axis is %.1f degrees away from straight "
+            "down at the start pose. The object is placed along "
+            "the camera axis (still centered in frame), but the "
+            "arc no longer starts at the top of the sphere - "
+            "adjust the start joints so the camera looks down.",
+            aim_error_deg
+        )
 
     if rod_radius > 0.0:
         add_support_rod(
@@ -1173,7 +1638,8 @@ def main():
     try:
         waypoints = create_arc_waypoints(
             start_pose=start_pose,
-            radius=arc_radius,
+            center=center_np,
+            lens_start=lens_start,
             arc_degrees=arc_degrees,
             number_of_points=number_of_points,
             track_object=track_object
@@ -1233,7 +1699,8 @@ def main():
             log_writer,
             move_group,
             index,
-            arc_degrees * float(index) / float(total_points)
+            arc_degrees * float(index) / float(total_points),
+            lens_xyz
         )
 
         if index < total_points:
