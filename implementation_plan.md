@@ -83,8 +83,8 @@ Operational consequences:
   around a phantom gripper overlapping the holder).
 - `panda_moveit_ctrl_server_node.py` updated: `load_gripper=False`, `ee="panda_link8"`.
 - `panda_moveit_ctrl_node.py` (gripper open/close test) is obsolete — there is no gripper.
-- The holder mesh is 52 k triangles; if planning gets slow, decimate a copy and point
-  `_holder_mesh` at it.
+- The default mesh (`Mount+phone.stl`, holder + phone) is 120 k triangles; if planning gets
+  slow, decimate a copy and point `_holder_mesh` at it.
 
 `Mount+phone.stl` (same coordinate frame) adds the iPhone 15 Pro: it sits at **45° in the
 cradle**, and the three camera lens rings were located by circle fitting (spread ≤0.7 mm).
@@ -162,8 +162,8 @@ Safety defaults: velocity and acceleration scaled to **5 %**, and **nothing move
 | `panda_moveit_ctrl_server_node.py` | Starts `PandaRobotService` — ROS service server for robot control (vel/acc 0.4, `panda_link8` end-effector, no gripper) |
 | `panda_moveit_ctrl_node.py` | Standalone gripper test node — obsolete since the phone holder replaced the gripper |
 | `joint_start.csv` | Single line, 7 comma-separated joint values (rad) — the start configuration. **Needs re-recording for the 45° camera cradle** |
-| `franka_phone_holder_merged_backface.stl` | Phone-holder hand (mm), attached to `panda_link8` as collision geometry |
-| `Mount+phone.stl` | Holder + iPhone 15 Pro assembly (mm, same frame) — source of the lens/camera measurements, not used at runtime |
+| `Mount+phone.stl` | Holder + iPhone 15 Pro assembly (mm) — attached to `panda_link8` as collision geometry (default `_holder_mesh`), and source of the lens/camera measurements. Must be copied to the robot PC next to the script |
+| `franka_phone_holder_merged_backface.stl` | Holder-only mesh (mm, same frame/attach pose) — alternative `_holder_mesh` if the phone is not mounted |
 
 ## Notes / caveats
 

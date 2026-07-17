@@ -165,7 +165,11 @@ KEEPOUT_IGNORED_LINKS = (
 #     in the hand frame, hand mounted at yaw -45 deg), so the holder
 #     mounts at HOLDER_YAW_DEG = -90.
 HOLDER_OBJECT_NAME = "phone_holder"
-HOLDER_MESH_FILE = "franka_phone_holder_merged_backface.stl"
+# Default mesh: holder WITH the phone - the phone is physically
+# mounted, so its body must be collision-checked too (same frame
+# and attach pose as the holder-only STL). The file must sit next
+# to this script on the robot PC.
+HOLDER_MESH_FILE = "Mount+phone.stl"
 HOLDER_ATTACH_LINK = "panda_link8"
 HOLDER_MESH_SCALE = 0.001  # the STL is modeled in millimeters
 HOLDER_Z_OFFSET = -0.008

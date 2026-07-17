@@ -52,6 +52,20 @@ rosrun panda_moveit_ctrl panda_semicircle_motion.py _joint_file:=src/panda_movei
 - `_execute:=true` — moves the **real robot**
 - `_execute:=false` or omitted — dry run, no motion
 
+## Testing in simulation (demo mode, no robot)
+
+Same flow, but Terminal 1 runs the simulated robot instead of `franka_control.launch`:
+
+```bash
+roslaunch panda_moveit_config demo.launch load_gripper:=false
+```
+
+Then run Terminal 3 **with `_execute:=true`** — it is safe here because `demo.launch` only
+drives a fake controller in RViz; the launch file decides sim vs real, not the `_execute`
+flag. RViz shows the attached phone holder on the flange — check its orientation against the
+physical holder. Note that `_execute:=false` is **not** a simulation: it validates the
+parameters and exits before planning, so it cannot catch unreachable waypoints.
+
 ## Tunable parameters (Terminal 3)
 
 All are private ROS params (`_name:=value`):
@@ -72,7 +86,7 @@ All are private ROS params (`_name:=value`):
 | `_lens_xyz` | ultra-wide lens of the iPhone 15 Pro, measured from `Mount+phone.stl`: `-0.0227,-0.0680,0.1160` (m) | Phone-lens position in the **flange frame** (`panda_link8`). The object is placed `radius` from the **lens along the camera axis**, and the arc keeps the lens (not the flange) at `radius`. `_lens_xyz:=''` falls back to the legacy scalar `_camera_offset` behavior |
 | `_lens_axis` | `-0.70711,0.0,0.70711` | Direction the camera looks, unit vector in the flange frame (the phone sits at 45° in the cradle). With the default, the **start pose must pitch the flange 45°** so the camera looks straight down — the script warns if the camera axis is >5° off vertical |
 | `_camera_offset` | `0.10` (m) | **Legacy**, only used with `_lens_xyz:=''`: lens assumed on the flange z axis, `camera_offset` below it |
-| `_holder_mesh` | `franka_phone_holder_merged_backface.stl` next to the script | STL (binary, in mm) of the phone holder, attached rigidly to `panda_link8` as collision geometry. `''` disables the attachment |
+| `_holder_mesh` | `Mount+phone.stl` next to the script | STL (binary, in mm) of the phone holder **with the phone**, attached rigidly to `panda_link8` as collision geometry. **Copy the STL to the robot PC next to the script** (`src/panda_moveit_ctrl/scripts/`), or the script exits with an error. `''` disables the attachment |
 | `_holder_z_offset` | `-0.008` (m) | Mesh z shift so its ISO 9409-1-A50 mounting face (at z = +8 mm in mesh coordinates) sits flush on the flange surface |
 | `_holder_yaw_deg` | `-90.0` | Rotation of the mesh about the flange z axis. Derived from the dowel pin: the mesh's pin hole is on its +Y axis, the flange's pin is on +X of `panda_link8` |
 | `_output_file` | `arc_poses_<date>_<time>.csv` **next to the script** (`src/panda_moveit_ctrl/scripts/`) | CSV file recording, for the start pose and every waypoint reached: the 7 joint values, end-effector position, orientation quaternion, and the world lens position. Written incrementally, so an aborted run keeps everything up to the failure. A relative path given explicitly is resolved against the terminal's current directory |
