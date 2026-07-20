@@ -149,7 +149,9 @@ OMPL planning / Franka controller goal tolerances fail. Fix in `move_to_pose`:
    looking down at the object; the start is the highest point of the trajectory).
 4. Adds the **support rod** collision cylinder (ground → object) and the **keep-out sphere**
    at the center (unless disabled via `_rod_radius:=0` / `_object_radius:=0`).
-5. Generates **9 waypoints** along a **60° arc of radius `r`** in the **Y-Z plane**:
+5. Generates **9 waypoints** along a **60° arc of radius `r`** in the **Y-Z plane**, then
+   **always waits for Enter** before the first arc move (2026-07-20) — the moment to place
+   the physical object at the logged sphere-center position:
    - `delta_y = direction · r · sin θ`, `delta_z = r * (cos θ − 1)` — constant distance `r`
      from the object
    - motion **descends from the top** of the sphere toward **−Y by default**
@@ -157,8 +159,10 @@ OMPL planning / Franka controller goal tolerances fail. Fix in `move_to_pose`:
    - **X stays constant**; orientation rotates by −θ about X so the camera keeps aiming at
      the object (frozen instead if `_track_object:=false`)
 6. Moves to each waypoint one by one (straight-line Cartesian segment, re-timed to 5 % speed,
-   with pose-target fallback), **waiting 2 s between waypoints**, and logs the exact pose
-   reached at every stop.
+   with pose-target fallback) and logs the exact pose reached at every stop. Between
+   waypoints: `_wait_between_points` seconds (default 2 s), or with
+   `_confirm_each_pose:=true` an **Enter press per pose** (take the photo, confirm, the arm
+   moves on).
 
 Safety defaults: velocity and acceleration scaled to **5 %**, and **nothing moves unless
 `_execute:=true`** — without it the script only loads/validates everything and exits

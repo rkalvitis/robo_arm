@@ -17,6 +17,9 @@ The script:
    object (sphere center) at distance 'radius' from the LENS along
    the camera axis - straight below it when the start pose aims
    the camera down;
+4b. once the initial pose is reached, ALWAYS waits for Enter
+    before anything else moves - the moment to place the object
+    under the lens (the exact position is in the log);
 5. generates waypoints along an arc in the Y-Z plane, centered on
    the object, descending from above toward the -Y side by default
    (_arc_direction:=1 restores the original +Y sweep), so the
@@ -25,7 +28,9 @@ The script:
    keeps aiming at the object;
 7. adds the object's sphere to the planning scene as a keep-out
    region so no part of the arm can plan through it;
-8. waits 2 seconds between one waypoint and the next.
+8. between waypoints: waits _wait_between_points seconds, or, with
+   _confirm_each_pose:=true, waits for Enter at every stop instead
+   (take the photo, press Enter, the arm moves on).
 
 Example joint_start.csv:
 
@@ -77,6 +82,14 @@ ARC_DIRECTION = -1.0
 
 WAIT_BETWEEN_POINTS = 2.0
 WAIT_AFTER_INITIAL_POSITION = 2.0
+
+# When True the script stops at every waypoint and waits for Enter
+# before moving to the next one (photo workflow); when False it
+# pauses _wait_between_points seconds instead. Independent of this
+# flag, the script ALWAYS waits for Enter once the robot is at the
+# initial pose, so the object can be placed under the lens before
+# the arc starts.
+CONFIRM_EACH_POSE = False
 
 VELOCITY_SCALE = 0.05
 ACCELERATION_SCALE = 0.05
@@ -1166,6 +1179,22 @@ def print_current_pose(move_group, label):
     )
 
 
+def wait_for_enter(message):
+    """
+    Blocks until Enter is pressed in this terminal. Ctrl-C still
+    aborts the script as usual.
+    """
+
+    rospy.loginfo(message)
+
+    try:
+        input(">>> Press Enter to continue... ")
+    except EOFError:
+        rospy.logwarn(
+            "stdin is closed - cannot wait for input, continuing."
+        )
+
+
 def main():
     moveit_commander.roscpp_initialize(sys.argv)
     rospy.init_node(
@@ -1191,6 +1220,14 @@ def main():
     wait_between_points = rospy.get_param(
         "~wait_between_points",
         WAIT_BETWEEN_POINTS
+    )
+
+    # true = wait for Enter at every waypoint before moving to the
+    # next one; false = pause _wait_between_points seconds instead.
+    # The Enter confirmation at the initial pose is unconditional.
+    confirm_each_pose = rospy.get_param(
+        "~confirm_each_pose",
+        CONFIRM_EACH_POSE
     )
 
     radius = rospy.get_param(
@@ -1366,10 +1403,16 @@ def main():
         "Output file for joint values and poses: %s",
         output_file
     )
-    rospy.loginfo(
-        "Wait between waypoints: %.2f seconds",
-        wait_between_points
-    )
+    if confirm_each_pose:
+        rospy.loginfo(
+            "Waypoint advance: manual - Enter required at every "
+            "pose."
+        )
+    else:
+        rospy.loginfo(
+            "Wait between waypoints: %.2f seconds",
+            wait_between_points
+        )
 
     if arc_degrees > 90.0:
         rospy.logwarn(
@@ -1689,6 +1732,16 @@ def main():
 
     total_points = len(waypoints)
 
+    # Unconditional pause at the initial pose: the object (and its
+    # rod) can now be placed under the lens - the exact target
+    # position is in the "Object (sphere center)" log line above.
+    wait_for_enter(
+        "Robot at the initial pose, %d waypoints ready. Place the "
+        "object at the logged sphere-center position (%.1f cm "
+        "below the lens), clear the workspace, then confirm to "
+        "start the arc." % (total_points, radius * 100.0)
+    )
+
     for index, waypoint in enumerate(waypoints, start=1):
 
         if rospy.is_shutdown():
@@ -1738,12 +1791,22 @@ def main():
         )
 
         if index < total_points:
-            rospy.loginfo(
-                "Waiting %.2f seconds before the next waypoint...",
-                wait_between_points
-            )
+            if confirm_each_pose:
+                wait_for_enter(
+                    "Waypoint %d/%d done - take the photo, then "
+                    "confirm to move to the next pose." % (
+                        index,
+                        total_points
+                    )
+                )
+            else:
+                rospy.loginfo(
+                    "Waiting %.2f seconds before the next "
+                    "waypoint...",
+                    wait_between_points
+                )
 
-            rospy.sleep(wait_between_points)
+                rospy.sleep(wait_between_points)
 
     rospy.loginfo(
         "All waypoints have been completed."
