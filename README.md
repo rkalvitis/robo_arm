@@ -76,6 +76,7 @@ All are private ROS params (`_name:=value`):
 | `_execute` | `false` | `true` = move the real robot |
 | `_radius` | `0.04` (m) | Arc radius = camera-object distance (target range 3–5 cm) |
 | `_arc_degrees` | `60.0` | Arc sweep angle |
+| `_arc_direction` | `-1.0` | Side of the world Y axis the arc descends toward: `-1` = sweep toward **−Y** (default since 2026-07-20 — the phone/lens side of the flange with `Mount+phone.stl`), `+1` = toward +Y (the original direction). The camera-aim rotation flips together with it; any value is normalized to its sign |
 | `_number_of_points` | `9` | Number of waypoints (photo poses) along the arc |
 | `_wait_between_points` | `2.0` (s) | Pause at each waypoint |
 | `_track_object` | `true` | `true` = the hand rotates along the arc so the camera **always faces the object** (no roll — photo rotation stays consistent); the flange orbits at `radius + camera_offset` so the lens keeps `radius`. `false` = orientation frozen relative to the world (tested 2026-07-16: far waypoints become physically unreachable, object leaves the frame) |
@@ -83,10 +84,10 @@ All are private ROS params (`_name:=value`):
 | `_keepout_ignored_links` | hand + finger links incl. `*_sc` capsule variants | Links allowed to touch the keep-out sphere (the hand carries the camera and must get that close); the rest of the arm is still kept out. The script also auto-detects and exempts (with a warning) any link still in contact with the sphere at the start pose |
 | `_rod_radius` | `0.005` (m) | Radius of the collision cylinder for the object's **support rod** (real rod is 2 mm; default includes a 3 mm margin). Vertical, from the ground to the object; **no link is exempt from it**. `0` disables |
 | `_object_height` | `0.55` (m) | Height of the object above the **ground** = length of the support rod (the rod hangs that far below the object in the planning scene, always at full height) |
-| `_lens_xyz` | ultra-wide lens of the iPhone 15 Pro, measured from `phone mount edit.stl`: `-0.0539,0.0646,0.0856` (m) | Phone-lens position in the **flange frame** (`panda_link8`). The object is placed `radius` from the **lens along the camera axis**, and the arc keeps the lens (not the flange) at `radius`. `_lens_xyz:=''` falls back to the legacy scalar `_camera_offset` behavior |
+| `_lens_xyz` | ultra-wide lens of the iPhone 15 Pro, measured from `Mount+phone.stl`: `-0.0227,-0.0680,0.1160` (m) | Phone-lens position in the **flange frame** (`panda_link8`). The object is placed `radius` from the **lens along the camera axis**, and the arc keeps the lens (not the flange) at `radius`. `_lens_xyz:=''` falls back to the legacy scalar `_camera_offset` behavior |
 | `_lens_axis` | `-0.70711,0.0,0.70711` | Direction the camera looks, unit vector in the flange frame (the phone sits at 45° in the cradle). With the default, the **start pose must pitch the flange 45°** so the camera looks straight down — the script warns if the camera axis is >5° off vertical |
 | `_camera_offset` | `0.10` (m) | **Legacy**, only used with `_lens_xyz:=''`: lens assumed on the flange z axis, `camera_offset` below it |
-| `_holder_mesh` | `phone mount edit.stl` next to the script | STL (binary, in mm) of the phone holder **with the phone**, attached rigidly to `panda_link8` as collision geometry. **Copy the STL to the robot PC next to the script** (`src/panda_moveit_ctrl/scripts/`), or the script exits with an error. The filename contains **spaces** — quote the path when passing this param manually. `''` disables the attachment |
+| `_holder_mesh` | `Mount+phone.stl` next to the script | STL (binary, in mm) of the phone holder **with the phone**, attached rigidly to `panda_link8` as collision geometry. **Copy the STL to the robot PC next to the script** (`src/panda_moveit_ctrl/scripts/`), or the script exits with an error. `''` disables the attachment |
 | `_holder_z_offset` | `-0.008` (m) | Mesh z shift so its ISO 9409-1-A50 mounting face (at z = +8 mm in mesh coordinates) sits flush on the flange surface |
 | `_holder_yaw_deg` | `-90.0` | Rotation of the mesh about the flange z axis. Derived from the dowel pin: the mesh's pin hole is on its +Y axis, the flange's pin is on +X of `panda_link8` |
 | `_output_file` | `arc_poses_<date>_<time>.csv` **next to the script** (`src/panda_moveit_ctrl/scripts/`) | CSV file recording, for the start pose and every waypoint reached: the 7 joint values, end-effector position, orientation quaternion, and the world lens position. Written incrementally, so an aborted run keeps everything up to the failure. A relative path given explicitly is resolved against the terminal's current directory |
@@ -115,25 +116,22 @@ geometry. Alignment was derived from the mesh's DIN ISO 9409-1-A50 mounting face
 attached before the script exits) and compare the attached mesh in RViz with the physical
 holder; the cradle side must point the same way.
 
-### Phone and camera (`phone mount edit.stl`)
+### Phone and camera (`Mount+phone.stl`)
 
-The full assembly mesh shares the holder's coordinate frame (flange base verified identical
-to the old mesh: contact face at z = +8 mm, pin hole Ø6 at +90°). Measurements extracted
-from it:
+The full assembly mesh shares the holder's coordinate frame. Measurements extracted from it:
 
-- the iPhone 15 Pro (146.6 × 70.6 mm) sits at **45°** in the cradle, **rotated 180° in the
-  cradle plane** vs the old `Mount+phone.stl` (verified: the lens-ring constellation maps
-  exactly under an in-plane 180° rotation, identical per-ring mesh fingerprints); the camera
-  still looks along `(-0.70711, 0, 0.70711)` in the flange frame
-- lens-ring centers (flange frame, mm): **ultra-wide (−53.9, 64.6, 85.6)**;
-  main (−53.9, 83.8, 85.6); telephoto (−40.5, 74.3, 99.0)
+- the iPhone 15 Pro (146.6 × 70.6 mm) sits at **45°** in the cradle; the camera looks along
+  `(-0.70711, 0, 0.70711)` in the flange frame
+- lens-ring centers (flange frame, mm): **ultra-wide (−22.7, −68.0, 116.0)** — bottom-left
+  lens of the bump seen from the back in portrait; main (−22.7, −87.2, 116.0); telephoto
+  (−35.4, −77.5, 103.3)
 - the arc keeps the **ultra-wide lens** at `_radius` from the object and aimed at it
   (`_lens_xyz` / `_lens_axis`)
-- consequence of the 180° flip: photos come out rotated 180° relative to the old mount
-  (EXIF orientation normally corrects this), and the lens sits on the **opposite side of
-  the flange** (+Y of `panda_link8` instead of −Y) — the object/rod position under the
-  same start pose shifts accordingly (the script recomputes and logs it; re-measure when
-  placing the object)
+- the lens sits on the **−Y side** of `panda_link8`, which is why the arc now descends
+  toward −Y by default (`_arc_direction`): the phone leads the sweep on its own side
+- `phone mount edit.stl` (phone rotated 180° in the cradle, lens on the +Y side) was
+  analyzed on 2026-07-20 but **not adopted** — the sweep side is flipped in software
+  instead
 
 Because of the 45° cradle, the **start joint configuration must pitch the flange 45°** so
 the camera starts looking straight down; the script warns if the camera axis is more than 5°

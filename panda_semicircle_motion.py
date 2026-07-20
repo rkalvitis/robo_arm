@@ -18,7 +18,8 @@ The script:
    the camera axis - straight below it when the start pose aims
    the camera down;
 5. generates waypoints along an arc in the Y-Z plane, centered on
-   the object, descending from above toward the +Y side, so the
+   the object, descending from above toward the -Y side by default
+   (_arc_direction:=1 restores the original +Y sweep), so the
    lens-object distance stays constant;
 6. rotates the whole pose rigidly at each waypoint so the camera
    keeps aiming at the object;
@@ -68,6 +69,12 @@ RADIUS_METERS = 0.04
 ARC_DEGREES = 60.0
 NUMBER_OF_POINTS = 9
 
+# Side of the world Y axis the arc descends toward: -1.0 sweeps
+# toward -Y (default since 2026-07-20 - the phone/lens side of the
+# flange with Mount+phone.stl), +1.0 toward +Y (the original
+# direction). The camera-aim rotation flips together with it.
+ARC_DIRECTION = -1.0
+
 WAIT_BETWEEN_POINTS = 2.0
 WAIT_AFTER_INITIAL_POSITION = 2.0
 
@@ -111,17 +118,15 @@ SUPPORT_ROD_RADIUS = 0.005
 CAMERA_OFFSET_METERS = 0.10
 
 # Ultra-wide lens of the iPhone 15 Pro in the phone holder, in the
-# panda_link8 (flange) frame, measured from "phone mount edit.stl"
-# by fitting the lens-ring circles of the camera bump (the phone
-# still sits at 45 degrees in the cradle, but ROTATED 180 degrees
-# in the cradle plane vs the old Mount+phone.stl - verified: the
-# ring constellation maps exactly under an in-plane 180-degree
-# rotation with identical per-ring mesh fingerprints, so the lens
-# identities carry over). Main is at link8 (-0.0539, 0.0838,
-# 0.0856), telephoto at (-0.0405, 0.0743, 0.0990). Verify which
-# ring is the ultra-wide by covering the lenses one at a time with
-# the Camera app at 0.5x.
-LENS_XYZ_LINK8 = "-0.0539,0.0646,0.0856"
+# panda_link8 (flange) frame, measured from Mount+phone.stl by
+# fitting the lens-ring circles of the camera bump (the phone sits
+# at 45 degrees in the cradle, camera bump toward the +Z end).
+# On the iPhone 15 Pro the ultra-wide is the BOTTOM-LEFT lens of
+# the bump (back view, portrait); main is top-left at link8
+# (-0.0227, -0.0872, 0.1160), telephoto at (-0.0354, -0.0775,
+# 0.1033). Verify which ring is the ultra-wide by covering the
+# lenses one at a time with the Camera app at 0.5x.
+LENS_XYZ_LINK8 = "-0.0227,-0.0680,0.1160"
 
 # Direction the camera looks, unit vector in the panda_link8 frame
 # (normal of the phone back): 45 degrees between the flange z axis
@@ -170,9 +175,8 @@ HOLDER_OBJECT_NAME = "phone_holder"
 # Default mesh: holder WITH the phone - the phone is physically
 # mounted, so its body must be collision-checked too (same frame
 # and attach pose as the holder-only STL). The file must sit next
-# to this script on the robot PC. Note the SPACES in the filename:
-# quote the path if passing _holder_mesh manually.
-HOLDER_MESH_FILE = "phone mount edit.stl"
+# to this script on the robot PC.
+HOLDER_MESH_FILE = "Mount+phone.stl"
 HOLDER_ATTACH_LINK = "panda_link8"
 HOLDER_MESH_SCALE = 0.001  # the STL is modeled in millimeters
 HOLDER_Z_OFFSET = -0.008
@@ -280,13 +284,15 @@ def compute_camera_geometry(start_pose, lens_xyz, lens_axis, radius):
     return lens_position, axis_world, center
 
 
-def compute_aim_orientation(start_orientation, theta):
+def compute_aim_orientation(start_orientation, theta, direction):
     """
-    Rotates the start orientation by -theta about the world X axis.
+    Rotates the start orientation by -direction*theta about the
+    world X axis.
 
-    The waypoint positions rotate by -theta about the X axis around
-    the sphere center, so applying the same rotation to the
-    orientation keeps the camera aiming at the object.
+    The waypoint positions rotate by -direction*theta about the X
+    axis around the sphere center, so applying the same rotation to
+    the orientation keeps the camera aiming at the object
+    (direction +1 = arc toward +Y, -1 = toward -Y).
     """
 
     q_start = [
@@ -296,7 +302,9 @@ def compute_aim_orientation(start_orientation, theta):
         start_orientation.w
     ]
 
-    q_rot = quaternion_about_axis(-theta, (1.0, 0.0, 0.0))
+    q_rot = quaternion_about_axis(
+        -direction * theta, (1.0, 0.0, 0.0)
+    )
 
     return quaternion_multiply(q_rot, q_start)
 
@@ -307,7 +315,8 @@ def create_arc_waypoints(
         lens_start,
         arc_degrees,
         number_of_points,
-        track_object):
+        track_object,
+        direction):
     """
     Generates flange waypoints so the LENS orbits the object
     (sphere center) at constant distance, sweeping an arc in the
@@ -317,13 +326,14 @@ def create_arc_waypoints(
     +Z = up
 
     With track_object=True the whole start pose is rotated rigidly
-    about the object center around the world X axis by -theta:
-    the lens keeps its exact starting distance and stays aimed at
-    the object at every waypoint, whatever its offset from the
-    flange, and the camera never rolls. The camera starts looking
-    at the object (straight down at the start pose), sweeps toward
-    +Y descending along the sphere; at 90 degrees it looks at the
-    object from the side, beyond that from underneath.
+    about the object center around the world X axis by
+    -direction*theta: the lens keeps its exact starting distance
+    and stays aimed at the object at every waypoint, whatever its
+    offset from the flange, and the camera never rolls. The camera
+    starts looking at the object (straight down at the start
+    pose) and descends along the sphere toward -Y (direction=-1,
+    the default) or +Y (direction=+1); at 90 degrees it looks at
+    the object from the side, beyond that from underneath.
 
     With track_object=False the orientation stays frozen: the LENS
     still orbits the center, and the flange keeps its constant
@@ -364,13 +374,15 @@ def create_arc_waypoints(
             # Rotate the whole pose (flange position + orientation)
             # about the object center: the rigidly-attached lens
             # follows, staying at 'radius' and aimed at the object.
-            position = center + rotate_about_x(delta_flange, -theta)
+            position = center + rotate_about_x(
+                delta_flange, -direction * theta
+            )
         else:
             # Frozen orientation: the lens orbits the center, and
             # the flange keeps its constant world offset from it.
             position = (
                 center
-                + rotate_about_x(delta_lens, -theta)
+                + rotate_about_x(delta_lens, -direction * theta)
                 - lens_offset_world
             )
 
@@ -383,7 +395,8 @@ def create_arc_waypoints(
         if track_object:
             orientation = compute_aim_orientation(
                 start_pose.orientation,
-                theta
+                theta,
+                direction
             )
 
             waypoint.orientation.x = orientation[0]
@@ -1190,6 +1203,15 @@ def main():
         ARC_DEGREES
     )
 
+    # -1 = descend toward -Y (default), +1 = toward +Y. Any other
+    # value is normalized to its sign.
+    arc_direction = rospy.get_param(
+        "~arc_direction",
+        ARC_DIRECTION
+    )
+
+    arc_direction = -1.0 if float(arc_direction) < 0.0 else 1.0
+
     number_of_points = rospy.get_param(
         "~number_of_points",
         NUMBER_OF_POINTS
@@ -1237,7 +1259,7 @@ def main():
 
     # Lens transform in the flange frame. The default is the
     # ultra-wide lens of the iPhone 15 Pro measured from
-    # "phone mount edit.stl"; _lens_xyz:='' falls back to the legacy
+    # Mount+phone.stl; _lens_xyz:='' falls back to the legacy
     # behavior (lens on the flange z axis at _camera_offset).
     lens_xyz_text = rospy.get_param(
         "~lens_xyz",
@@ -1310,6 +1332,10 @@ def main():
     rospy.loginfo("Execution enabled: %s", execute_motion)
     rospy.loginfo("Radius: %.4f m", radius)
     rospy.loginfo("Arc: %.2f degrees", arc_degrees)
+    rospy.loginfo(
+        "Arc direction: toward %s",
+        "-Y" if arc_direction < 0.0 else "+Y"
+    )
     rospy.loginfo("Number of waypoints: %d", number_of_points)
     rospy.loginfo("Camera tracks the object: %s", track_object)
     rospy.loginfo(
@@ -1649,7 +1675,8 @@ def main():
             lens_start=lens_start,
             arc_degrees=arc_degrees,
             number_of_points=number_of_points,
-            track_object=track_object
+            track_object=track_object,
+            direction=arc_direction
         )
     except Exception as error:
         rospy.logerr(
