@@ -111,15 +111,17 @@ SUPPORT_ROD_RADIUS = 0.005
 CAMERA_OFFSET_METERS = 0.10
 
 # Ultra-wide lens of the iPhone 15 Pro in the phone holder, in the
-# panda_link8 (flange) frame, measured from Mount+phone.stl by
-# fitting the lens-ring circles of the camera bump (the phone sits
-# at 45 degrees in the cradle, camera bump toward the +Z end).
-# On the iPhone 15 Pro the ultra-wide is the BOTTOM-LEFT lens of
-# the bump (back view, portrait); main is top-left at link8
-# (-0.0227, -0.0872, 0.1160), telephoto at (-0.0354, -0.0775,
-# 0.1033). Verify which ring is the ultra-wide by covering the
-# lenses one at a time with the Camera app at 0.5x.
-LENS_XYZ_LINK8 = "-0.0227,-0.0680,0.1160"
+# panda_link8 (flange) frame, measured from "phone mount edit.stl"
+# by fitting the lens-ring circles of the camera bump (the phone
+# still sits at 45 degrees in the cradle, but ROTATED 180 degrees
+# in the cradle plane vs the old Mount+phone.stl - verified: the
+# ring constellation maps exactly under an in-plane 180-degree
+# rotation with identical per-ring mesh fingerprints, so the lens
+# identities carry over). Main is at link8 (-0.0539, 0.0838,
+# 0.0856), telephoto at (-0.0405, 0.0743, 0.0990). Verify which
+# ring is the ultra-wide by covering the lenses one at a time with
+# the Camera app at 0.5x.
+LENS_XYZ_LINK8 = "-0.0539,0.0646,0.0856"
 
 # Direction the camera looks, unit vector in the panda_link8 frame
 # (normal of the phone back): 45 degrees between the flange z axis
@@ -168,8 +170,9 @@ HOLDER_OBJECT_NAME = "phone_holder"
 # Default mesh: holder WITH the phone - the phone is physically
 # mounted, so its body must be collision-checked too (same frame
 # and attach pose as the holder-only STL). The file must sit next
-# to this script on the robot PC.
-HOLDER_MESH_FILE = "Mount+phone.stl"
+# to this script on the robot PC. Note the SPACES in the filename:
+# quote the path if passing _holder_mesh manually.
+HOLDER_MESH_FILE = "phone mount edit.stl"
 HOLDER_ATTACH_LINK = "panda_link8"
 HOLDER_MESH_SCALE = 0.001  # the STL is modeled in millimeters
 HOLDER_Z_OFFSET = -0.008
@@ -1234,7 +1237,7 @@ def main():
 
     # Lens transform in the flange frame. The default is the
     # ultra-wide lens of the iPhone 15 Pro measured from
-    # Mount+phone.stl; _lens_xyz:='' falls back to the legacy
+    # "phone mount edit.stl"; _lens_xyz:='' falls back to the legacy
     # behavior (lens on the flange z axis at _camera_offset).
     lens_xyz_text = rospy.get_param(
         "~lens_xyz",
