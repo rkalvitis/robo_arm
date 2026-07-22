@@ -14,7 +14,7 @@ a COLMAP-format scene.
 | Decision | Value |
 |---|---|
 | Rotation | Insect rotated **by hand in 10° steps** using a degree map under the stand (36 steps/ring). OptiTrack measures the *actual* angle, so hand precision only affects coverage evenness, not pose accuracy. |
-| Lens | **Ultra-wide** (the lens the robot script already tracks: `_lens_xyz = (-0.0227, -0.0680, 0.1160)` in link8 frame). |
+| Lens | **Ultra-wide** (the lens the robot script tracks: `_lens_xyz = (-0.0225, -0.0239, 0.1170)` in link8 frame, from `phone_mount_conf3.stl`). |
 | Hand-eye | Done **tomorrow, after** image collection — valid only if phone + markers are untouched in the cradle between capture and calibration. |
 | Lighting | No tent — even room lighting, accepted as a known risk (see item 3). |
 | Arc | Reuse the proven run: **160° / 8 stops, r = 0.04 m, −Y sweep, `_confirm_each_pose:=true`** (all 8 reached on 2026-07-20). |
@@ -113,7 +113,9 @@ and don't touch the phone (hand-eye validity).
 4. **Capture loop**, per arc stop (start pose = ring 0, then 8 stops):
    - for each of 36 degree-map positions: rotate the stand to the next 10°
      mark → hands off → wait ~2–3 s for rod wobble to settle → shoot with the
-     remote → next.
+     remote → next. **A Reeflex focus stack takes ~20 s** (11 frames ~2 s
+     apart) — stay hands-off (no touching stand, table or robot) for the whole
+     stack, the pose-quality window spans all 11 frames.
    - bad shot? just retake — matching is by timestamp, not photo order, so
      extras/retakes are harmless.
    - ring done → Enter on the robot PC → arm moves to the next stop.
@@ -143,6 +145,44 @@ and don't touch the phone (hand-eye validity).
    you should see ~9 rings of ~36 cameras on a sphere around the origin.
 4. Keep the robot's `arc_poses_*.csv` from the script directory as the
    cross-check artifact.
+
+### Focus-stack files (Pro Reeflex) — what they contain and how to organize
+
+Verified on the 2026-07-21 `example dataset` (6 stacks):
+
+- Each shot = **11 focus DNGs + 1 composite JPG**, consecutive `IMG_` numbers.
+  Frames are ~2 s apart (~20 s per stack). The composite JPG's EXIF timestamp
+  is a **copy of the last DNG's** — it is not a 12th capture.
+- Every file has **millisecond timestamps** (`DateTimeOriginal` +
+  `SubSecTimeOriginal`) — exactly what `match_photos` needs; nothing manual.
+- Every DNG records its **focus position automatically** (Apple MakerNote
+  `FocusPosition`, actuator units): the locked bracket showed as
+  199→173, identical in every stack — a per-stack deviation means the anchor
+  focus was touched (the organizer warns).
+- **`organize_stacks.py`** (this repo, no dependencies) turns the flat AirDrop
+  dump into the dataset structure and renames every file self-describingly:
+  ```
+  python3 organize_stacks.py DUMP_DIR OUT_DIR              # dry run
+  python3 organize_stacks.py DUMP_DIR OUT_DIR --move       # 9 stops × 36 rot
+  →  s03_r120/s03_r120_f07_fp181.dng   (stop 3, 120°, frame 7, focus 181)
+     s03_r120/s03_r120_stacked.jpg
+     manifest.csv   (old→new names, focus sweep, t_first/t_mid/t_last per stack)
+  ```
+  Stop/rotation labels come from shooting order and are only assigned when the
+  stack count matches stops×rotations exactly — prune retakes first (or trust
+  the timestamp matching, which needs no ordering). Clock shots, ring-marker
+  photos and aborted stacks land in `unassigned/`.
+- **Feed `match_photos` only the DNGs** — the composite's duplicated timestamp
+  would create a phantom extra photo. Use each stack's `t_mid` to look up the
+  pose; all 11 frames + composite share that one pose (robot and turntable at
+  rest for the whole stack).
+- On-iPhone organization: not possible and not needed — shoot in strict order.
+  Optionally take ONE single (non-stack) photo of the stop label between
+  rings: it breaks the 11+1 pattern, lands in `unassigned/`, and documents the
+  ring boundary.
+- Volume check: 324 stacks ≈ 3 888 files ≈ **55 GB** — AirDrop in batches per
+  ring, or use the USB cable / Image Capture; verify the file count
+  (324 × 12 = 3 888) before wiping the phone.
 
 ## What is MISSING — post-capture pipeline (doesn't block tomorrow)
 

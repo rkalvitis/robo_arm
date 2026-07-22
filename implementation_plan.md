@@ -43,9 +43,9 @@ distance**:
 - **Lens transform (`_lens_xyz` / `_lens_axis`, flange frame; supersedes the scalar
   `_camera_offset` on 2026-07-17):** the frame MoveIt controls is the flange, but the photos
   are taken by the iPhone 15 Pro **ultra-wide lens**, which sits at
-  `(-0.0225, -0.0136, 0.1170)` m in the `panda_link8` frame and looks along
+  `(-0.0225, -0.0239, 0.1170)` m in the `panda_link8` frame and looks along
   `(-0.70711, 0, 0.70711)` — the phone lies at 45° in the holder cradle. Both values come
-  from `phone_mount_conf2.stl` (2026-07-22 configuration: original `Mount+phone.stl`
+  from `phone_mount_conf3.stl` (2026-07-22 configuration: original `Mount+phone.stl`
   lens-ring circle fits ±0.7 mm, carried over by the exact rigid transform of the phone
   part, re-verified by a fresh circle fit on the new mesh, 0.3 mm). The object is placed
   `radius` from the lens **along the camera axis**, and each waypoint is a rigid rotation of
@@ -86,17 +86,17 @@ Operational consequences:
   around a phantom gripper overlapping the holder).
 - `panda_moveit_ctrl_server_node.py` updated: `load_gripper=False`, `ee="panda_link8"`.
 - `panda_moveit_ctrl_node.py` (gripper open/close test) is obsolete — there is no gripper.
-- The default mesh (`phone_mount_conf2.stl`, holder + phone) is 123 k triangles; if
+- The default mesh (`phone_mount_conf3.stl`, holder + phone) is 123 k triangles; if
   planning gets slow, decimate a copy and point `_holder_mesh` at it.
 
-`phone_mount_conf2.stl` (same coordinate frame; current since 2026-07-22, phone flipped
-180° in the cradle vs `Mount+phone.stl` so the camera bump sits near the cradle center)
-adds the iPhone 15 Pro: it sits at **45° in the cradle**, and the three camera lens rings
-were located by circle fitting on the original mesh (spread ≤0.7 mm) and carried over by
-the exact rigid transform of the phone part (residual <1e-5 mm; re-verified by a fresh
-circle fit, 0.3 mm). In the flange frame (mm): ultra-wide (−22.5, −13.6, 117.0), main
-(−22.5, −32.8, 117.0), telephoto (−35.9, −23.3, 103.6); camera axis (−0.70711, 0, 0.70711)
-— unchanged. Ring identification:
+`phone_mount_conf3.stl` (same coordinate frame; current since 2026-07-22, phone flipped
+180° in the cradle vs `Mount+phone.stl` with the camera bump near the cradle center, then
+slid 10.3 mm toward flange −Y vs conf2) adds the iPhone 15 Pro: it sits at **45° in the
+cradle**, and the three camera lens rings were located by circle fitting on the original
+mesh (spread ≤0.7 mm) and carried over by the exact rigid transform of the phone part
+(residual <1e-5 mm; re-verified by a fresh circle fit, 0.3 mm). In the flange frame (mm):
+ultra-wide (−22.5, −23.9, 117.0), main (−22.5, −43.1, 117.0), telephoto (−35.9, −33.6,
+103.6); camera axis (−0.70711, 0, 0.70711) — unchanged. Ring identification:
 bump seen from the back in portrait = left column top/bottom + right middle; on the 15 Pro
 ultra-wide is bottom-left (verify once by covering lenses at 0.5×). Note the tabulated point
 is the **lens-ring top surface**; the optical entrance pupil sits a couple of mm behind it —
@@ -182,7 +182,8 @@ Safety defaults: velocity and acceleration scaled to **5 %**, and **nothing move
 | `panda_moveit_ctrl_server_node.py` | Starts `PandaRobotService` — ROS service server for robot control (vel/acc 0.4, `panda_link8` end-effector, no gripper) |
 | `panda_moveit_ctrl_node.py` | Standalone gripper test node — obsolete since the phone holder replaced the gripper |
 | `joint_start.csv` | Single line, 7 comma-separated joint values (rad) — the start configuration. **Needs re-recording for the 45° camera cradle** |
-| `phone_mount_conf2.stl` | **Current** holder + iPhone 15 Pro assembly (mm; since 2026-07-22, phone flipped 180° in the cradle, bump near the cradle center) — attached to `panda_link8` as collision geometry (default `_holder_mesh`), and source of the lens/camera measurements. Must be copied to the robot PC next to the script |
+| `phone_mount_conf3.stl` | **Current** holder + iPhone 15 Pro assembly (mm; since 2026-07-22, phone flipped 180° in the cradle, bump near the cradle center, slid 10.3 mm toward flange −Y vs conf2) — attached to `panda_link8` as collision geometry (default `_holder_mesh`), and source of the lens/camera measurements. Must be copied to the robot PC next to the script |
+| `phone_mount_conf2.stl` | Same as conf3 without the 10.3 mm slide (ultra-wide at link8 (−22.5, −13.6, 117.0) mm) — superseded the same day, **not used** |
 | `Mount+phone.stl` | Previous assembly (bump toward the +Z end; ultra-wide at link8 (−22.7, −68.0, 116.0) mm) — **not used**; origin of the original lens-ring circle fits |
 | `phone mount edit.stl` | Alternative assembly with the phone rotated 180° in the cradle (lens on the +Y flange side; ultra-wide at link8 (−53.9, 64.6, 85.6) mm) — analyzed 2026-07-20, **not used** |
 | `franka_phone_holder_merged_backface.stl` | Holder-only mesh (mm, same frame/attach pose) — alternative `_holder_mesh` if the phone is not mounted |
