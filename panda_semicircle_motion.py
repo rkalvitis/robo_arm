@@ -131,15 +131,18 @@ SUPPORT_ROD_RADIUS = 0.005
 CAMERA_OFFSET_METERS = 0.10
 
 # Ultra-wide lens of the iPhone 15 Pro in the phone holder, in the
-# panda_link8 (flange) frame, measured from Mount+phone.stl by
-# fitting the lens-ring circles of the camera bump (the phone sits
-# at 45 degrees in the cradle, camera bump toward the +Z end).
-# On the iPhone 15 Pro the ultra-wide is the BOTTOM-LEFT lens of
-# the bump (back view, portrait); main is top-left at link8
-# (-0.0227, -0.0872, 0.1160), telephoto at (-0.0354, -0.0775,
-# 0.1033). Verify which ring is the ultra-wide by covering the
-# lenses one at a time with the Camera app at 0.5x.
-LENS_XYZ_LINK8 = "-0.0227,-0.0680,0.1160"
+# panda_link8 (flange) frame, measured from phone_mount_conf2.stl
+# (the phone sits at 45 degrees in the cradle, flipped 180 degrees
+# vs the original Mount+phone.stl so the camera bump sits near the
+# cradle center). Values obtained by rigid-transforming the fitted
+# lens-ring circles of the previous mesh (phone part matches to
+# <1e-5 mm) and verified by a fresh circle fit on this mesh
+# (0.3 mm agreement). On the iPhone 15 Pro the ultra-wide is the
+# BOTTOM-LEFT lens of the bump (back view, portrait); main is at
+# link8 (-0.0225, -0.0328, 0.1170), telephoto at (-0.0359,
+# -0.0233, 0.1036). Verify which ring is the ultra-wide by
+# covering the lenses one at a time with the Camera app at 0.5x.
+LENS_XYZ_LINK8 = "-0.0225,-0.0136,0.1170"
 
 # Direction the camera looks, unit vector in the panda_link8 frame
 # (normal of the phone back): 45 degrees between the flange z axis
@@ -189,7 +192,7 @@ HOLDER_OBJECT_NAME = "phone_holder"
 # mounted, so its body must be collision-checked too (same frame
 # and attach pose as the holder-only STL). The file must sit next
 # to this script on the robot PC.
-HOLDER_MESH_FILE = "Mount+phone.stl"
+HOLDER_MESH_FILE = "phone_mount_conf2.stl"
 HOLDER_ATTACH_LINK = "panda_link8"
 HOLDER_MESH_SCALE = 0.001  # the STL is modeled in millimeters
 HOLDER_Z_OFFSET = -0.008
