@@ -35,6 +35,13 @@ The script:
    for reconstruction (e.g. 3DGS);
 7. adds the object's sphere to the planning scene as a keep-out
    region so no part of the arm can plan through it;
+7b. adds the white background screen (_screen_mesh, a half-
+    cylinder shell whose floor hole slides over the support rod)
+    as a world obstacle: its x/y is placed on the rod axis so the
+    insect sits inside the semicircle, its bottom sits
+    _screen_height above the ground, and its opening faces the
+    camera side of the arc (yaw picked from _arc_direction unless
+    _screen_yaw_deg overrides it). NO link may touch it;
 8. between waypoints: waits _wait_between_points seconds, or, with
    _confirm_each_pose:=true, waits for Enter at every stop instead
    (take the photo, press Enter, the arm moves on).
@@ -141,6 +148,28 @@ KEEPOUT_OBJECT_NAME = "object_keepout"
 # from the ground. Modeled with a safety margin; 0 disables it.
 ROD_OBJECT_NAME = "support_rod"
 SUPPORT_ROD_RADIUS = 0.005
+
+# White background screen behind the insect
+# (background-white-screen.stl, modeled in METERS): a half-
+# cylinder shell, wall radius 0.110-0.1125 m and 0.194 m tall,
+# with a 6 mm floor plate whose 4.4 mm hole sits exactly at the
+# arc center - the hole slides over the support rod, so the mesh
+# x/y origin IS the rod axis and the insect sits at the center of
+# the semicircle. The wall bulges toward mesh +Y. Added as a world
+# obstacle: NO link is exempt from it (unlike the keep-out
+# sphere).
+SCREEN_OBJECT_NAME = "background_screen"
+SCREEN_MESH_FILE = "background-white-screen.stl"
+SCREEN_MESH_SCALE = 1.0  # this STL is modeled in meters
+
+# Height of the screen's BOTTOM above the ground.
+SCREEN_HEIGHT_ABOVE_GROUND = 0.425
+
+# "auto" = open side toward the camera: with the default -Y arc
+# the wall goes behind the insect at +Y (yaw 0); with
+# _arc_direction:=1 the screen is yawed 180 degrees instead. A
+# number forces that yaw about the world Z axis.
+SCREEN_YAW_DEG = "auto"
 
 # Legacy scalar lens offset: distance from the flange down to the
 # lens along the flange z axis. Only used when _lens_xyz:='' is
@@ -695,6 +724,108 @@ def load_stl_mesh(file_path, scale):
     return mesh
 
 
+def add_background_screen(scene, move_group, center, object_height,
+                          mesh_file, scale, height_above_ground,
+                          yaw_deg):
+    """
+    Adds the white background screen as a world collision obstacle.
+
+    The mesh origin's vertical axis is the rod axis (the floor hole
+    sits at the arc center), so the screen is placed at the
+    object's x/y; the mesh bottom is placed height_above_ground
+    above the ground (ground = object center - object_height). The
+    yaw rotates the mesh about the world Z axis: at yaw 0 the wall
+    bulges toward +Y, leaving the -Y side (the default camera side)
+    open.
+
+    Publishing on /collision_object avoids the pyassimp dependency
+    of PlanningSceneInterface.add_mesh (same approach as the
+    phone-holder attachment). Returns (bottom_z, top_z) of the
+    screen in world coordinates.
+    """
+
+    mesh = load_stl_mesh(mesh_file, scale)
+
+    z_values = [vertex.z for vertex in mesh.vertices]
+    z_min = min(z_values)
+    z_max = max(z_values)
+
+    ground_z = center.z - object_height
+    bottom_z = ground_z + height_above_ground
+
+    mesh_pose = Pose()
+    mesh_pose.position.x = center.x
+    mesh_pose.position.y = center.y
+    mesh_pose.position.z = bottom_z - z_min
+
+    rotation = quaternion_about_axis(
+        math.radians(yaw_deg),
+        (0.0, 0.0, 1.0)
+    )
+
+    mesh_pose.orientation.x = rotation[0]
+    mesh_pose.orientation.y = rotation[1]
+    mesh_pose.orientation.z = rotation[2]
+    mesh_pose.orientation.w = rotation[3]
+
+    collision_object = CollisionObject()
+    collision_object.header.frame_id = move_group.get_planning_frame()
+    collision_object.id = SCREEN_OBJECT_NAME
+    collision_object.meshes = [mesh]
+    collision_object.mesh_poses = [mesh_pose]
+    collision_object.operation = CollisionObject.ADD
+
+    # Newer message versions add an object-level pose on top of the
+    # mesh poses; it must be a valid identity, not all zeros.
+    if hasattr(collision_object, "pose"):
+        collision_object.pose.orientation.w = 1.0
+
+    publisher = rospy.Publisher(
+        "/collision_object",
+        CollisionObject,
+        queue_size=2,
+        latch=True
+    )
+
+    rospy.sleep(0.5)
+
+    scene.remove_world_object(SCREEN_OBJECT_NAME)
+    rospy.sleep(0.5)
+
+    publisher.publish(collision_object)
+    rospy.sleep(1.0)
+
+    try:
+        confirmed = SCREEN_OBJECT_NAME in scene.get_known_object_names()
+    except Exception:
+        # Older moveit_commander versions - trust the latched
+        # publication.
+        confirmed = True
+
+    if not confirmed:
+        raise RuntimeError(
+            "move_group did not confirm the background screen"
+        )
+
+    top_z = bottom_z + (z_max - z_min)
+
+    rospy.loginfo(
+        "Background screen added: %s (%d triangles), rod axis at "
+        "x=%.6f, y=%.6f, bottom z=%.3f (%.1f cm above ground), "
+        "top z=%.3f, yaw %.1f deg",
+        mesh_file,
+        len(mesh.triangles),
+        center.x,
+        center.y,
+        bottom_z,
+        height_above_ground * 100.0,
+        top_z,
+        yaw_deg
+    )
+
+    return bottom_z, top_z
+
+
 def attach_phone_holder(scene, mesh_file, z_offset, yaw_deg):
     """
     Rigidly attaches the phone-holder mesh to the flange as an
@@ -928,10 +1059,11 @@ def allow_keepout_collisions(ignored_links):
 def find_keepout_contacts(robot):
     """
     Asks move_group whether the current state is collision-free and
-    which bodies are in contact with the keep-out sphere or the
-    support rod.
+    which bodies are in contact with the keep-out sphere, the
+    support rod or the background screen.
 
-    Returns (valid, sphere_links, rod_links, other_pairs).
+    Returns (valid, sphere_links, rod_links, screen_links,
+    other_pairs).
     """
 
     rospy.wait_for_service("/check_state_validity", timeout=5.0)
@@ -948,6 +1080,7 @@ def find_keepout_contacts(robot):
 
     sphere_links = set()
     rod_links = set()
+    screen_links = set()
     other_pairs = []
 
     for contact in response.contacts:
@@ -963,6 +1096,9 @@ def find_keepout_contacts(robot):
         elif ROD_OBJECT_NAME in bodies:
             bodies.discard(ROD_OBJECT_NAME)
             rod_links.update(bodies)
+        elif SCREEN_OBJECT_NAME in bodies:
+            bodies.discard(SCREEN_OBJECT_NAME)
+            screen_links.update(bodies)
         else:
             other_pairs.append(
                 "{} <-> {}".format(
@@ -972,28 +1108,30 @@ def find_keepout_contacts(robot):
             )
 
     return (response.valid, sorted(sphere_links),
-            sorted(rod_links), other_pairs)
+            sorted(rod_links), sorted(screen_links), other_pairs)
 
 
 def ensure_state_clear(robot):
     """
     Verifies that the current state is not considered in collision
-    with the keep-out sphere or the support rod. Links touching the
-    sphere are exempted (the camera mount has to sit this close to
-    the object); a collision with the rod is an error - the rod is
-    always checked at full height.
+    with the keep-out sphere, the support rod or the background
+    screen. Links touching the sphere are exempted (the camera
+    mount has to sit this close to the object); a collision with
+    the rod or the screen is an error - both are always checked
+    against every link.
     """
 
     for _ in range(5):
 
-        valid, sphere_links, rod_links, other_pairs = (
+        valid, sphere_links, rod_links, screen_links, other_pairs = (
             find_keepout_contacts(robot)
         )
 
         if valid:
             rospy.loginfo(
                 "Current state is collision-free with the "
-                "keep-out sphere and support rod in place."
+                "keep-out sphere, support rod and background "
+                "screen in place."
             )
             return True
 
@@ -1015,6 +1153,15 @@ def ensure_state_clear(robot):
             )
             return False
 
+        if screen_links:
+            rospy.logerr(
+                "Links in collision with the background screen: "
+                "%s. Adjust the start pose, or check "
+                "_screen_height / _screen_yaw_deg.",
+                ", ".join(screen_links)
+            )
+            return False
+
         rospy.logerr(
             "Current state is in collision for reasons unrelated "
             "to the keep-out sphere or the rod: %s",
@@ -1022,7 +1169,7 @@ def ensure_state_clear(robot):
         )
         return False
 
-    valid, _, _, _ = find_keepout_contacts(robot)
+    valid, _, _, _, _ = find_keepout_contacts(robot)
     return valid
 
 
@@ -1461,6 +1608,55 @@ def main():
         0.55
     )
 
+    # White background screen mesh (world obstacle, the floor hole
+    # slides over the support rod). '' disables it. Like the holder
+    # STL, the file must sit next to this script on the robot PC.
+    default_screen_mesh = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        SCREEN_MESH_FILE
+    )
+
+    screen_mesh = rospy.get_param(
+        "~screen_mesh",
+        default_screen_mesh
+    )
+
+    screen_scale = rospy.get_param(
+        "~screen_scale",
+        SCREEN_MESH_SCALE
+    )
+
+    # Height of the screen's bottom above the ground.
+    screen_height = rospy.get_param(
+        "~screen_height",
+        SCREEN_HEIGHT_ABOVE_GROUND
+    )
+
+    # "auto" = derived from _arc_direction so the opening faces the
+    # camera side; a number forces that yaw (deg, about world Z).
+    screen_yaw_param = rospy.get_param(
+        "~screen_yaw_deg",
+        SCREEN_YAW_DEG
+    )
+
+    if isinstance(screen_yaw_param, str):
+        if screen_yaw_param.strip().lower() != "auto":
+            try:
+                screen_yaw_deg = float(screen_yaw_param)
+            except ValueError:
+                rospy.logerr(
+                    "_screen_yaw_deg must be a number or 'auto', "
+                    "got: %s",
+                    screen_yaw_param
+                )
+
+                moveit_commander.roscpp_shutdown()
+                return 1
+        else:
+            screen_yaw_deg = 0.0 if arc_direction < 0.0 else 180.0
+    else:
+        screen_yaw_deg = float(screen_yaw_param)
+
     camera_offset = rospy.get_param(
         "~camera_offset",
         CAMERA_OFFSET_METERS
@@ -1570,6 +1766,17 @@ def main():
     rospy.loginfo(
         "Object height above the ground: %.3f m",
         object_height
+    )
+    rospy.loginfo(
+        "Background screen: %s (bottom %.3f m above ground, "
+        "yaw %.1f deg%s, scale %.3f)",
+        screen_mesh if screen_mesh else "disabled",
+        screen_height,
+        screen_yaw_deg,
+        " - auto from arc direction"
+        if isinstance(screen_yaw_param, str)
+        and screen_yaw_param.strip().lower() == "auto" else "",
+        screen_scale
     )
     rospy.loginfo(
         "Lens in the flange frame: position (%.4f, %.4f, %.4f) m, "
@@ -1763,6 +1970,7 @@ def main():
     # them before planning the move to the initial pose.
     scene.remove_world_object(KEEPOUT_OBJECT_NAME)
     scene.remove_world_object(ROD_OBJECT_NAME)
+    scene.remove_world_object(SCREEN_OBJECT_NAME)
     rospy.sleep(0.5)
 
     if not move_to_joint_position(
@@ -1865,6 +2073,45 @@ def main():
     else:
         rospy.logwarn(
             "Support rod disabled (_rod_radius <= 0)."
+        )
+
+    if screen_mesh:
+        try:
+            _, screen_top_z = add_background_screen(
+                scene,
+                move_group,
+                sphere_center,
+                object_height,
+                screen_mesh,
+                screen_scale,
+                screen_height,
+                screen_yaw_deg
+            )
+        except Exception as error:
+            rospy.logerr(
+                "Unable to add the background screen: %s. Planning "
+                "would ignore the real screen - fix _screen_mesh, "
+                "or pass _screen_mesh:='' to skip it deliberately.",
+                str(error)
+            )
+
+            log_handle.close()
+            moveit_commander.roscpp_shutdown()
+            return 1
+
+        if sphere_center.z + radius < screen_top_z:
+            rospy.logwarn(
+                "The screen rim (z=%.3f) is above the starting "
+                "lens height (z=%.3f): the phone works inside the "
+                "screen enclosure on the upper waypoints. MoveIt "
+                "will veto any pose where the holder would touch "
+                "the wall (11 cm from the rod).",
+                screen_top_z,
+                sphere_center.z + radius
+            )
+    else:
+        rospy.logwarn(
+            "Background screen disabled (_screen_mesh:='')."
         )
 
     if object_radius > 0.0:
