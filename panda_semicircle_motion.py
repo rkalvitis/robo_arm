@@ -25,7 +25,14 @@ The script:
    (_arc_direction:=1 restores the original +Y sweep), so the
    lens-object distance stays constant;
 6. rotates the whole pose rigidly at each waypoint so the camera
-   keeps aiming at the object;
+   keeps aiming at the object; the image ROLL about the camera
+   axis is free (_free_roll, default true): at every waypoint the
+   script tries roll angles - nearest the previous waypoint's roll
+   first - and moves to the first pose the arm can actually reach.
+   Any roll keeps the lens position, the lens-object distance and
+   the aim unchanged, so the object stays centered in frame; the
+   CSV records the pose actually reached, which is what matters
+   for reconstruction (e.g. 3DGS);
 7. adds the object's sphere to the planning scene as a keep-out
    region so no part of the arm can plan through it;
 8. between waypoints: waits _wait_between_points seconds, or, with
@@ -79,6 +86,17 @@ NUMBER_OF_POINTS = 9
 # flange with Mount+phone.stl), +1.0 toward +Y (the original
 # direction). The camera-aim rotation flips together with it.
 ARC_DIRECTION = -1.0
+
+# Image roll about the camera axis (only with _track_object:=true).
+# True = at every waypoint try rolls in ROLL_STEP_DEG increments up
+# to +/-ROLL_MAX_DEG, ordered by closeness to the roll used at the
+# previous waypoint, and take the first reachable pose. The roll
+# never moves the lens or the aim - the object stays centered in
+# frame - it only rotates the image, and the true orientation is in
+# the CSV. False = the original fixed zero-roll behavior.
+FREE_ROLL = True
+ROLL_STEP_DEG = 15.0
+ROLL_MAX_DEG = 180.0
 
 WAIT_BETWEEN_POINTS = 2.0
 WAIT_AFTER_INITIAL_POSITION = 2.0
@@ -326,6 +344,70 @@ def compute_aim_orientation(start_orientation, theta, direction):
     return quaternion_multiply(q_rot, q_start)
 
 
+def make_flange_pose(lens_target, camera_axis, q_aim, roll, lens_xyz):
+    """
+    Builds the flange pose that puts the LENS exactly at
+    lens_target looking along camera_axis (both world frame), with
+    the image rolled by 'roll' radians about the camera axis.
+
+    The flange position is derived from the orientation - the
+    flange-to-lens offset rotates together with the roll - so every
+    roll value keeps the same lens position, lens-object distance
+    and aim; only the image orientation changes.
+    """
+
+    if abs(roll) > 1e-12:
+        orientation = quaternion_multiply(
+            quaternion_about_axis(roll, camera_axis),
+            q_aim
+        )
+    else:
+        orientation = q_aim
+
+    rotation = quaternion_matrix(orientation)[:3, :3]
+
+    position = np.asarray(lens_target) - rotation.dot(lens_xyz)
+
+    pose = Pose()
+    pose.position.x = position[0]
+    pose.position.y = position[1]
+    pose.position.z = position[2]
+    pose.orientation.x = orientation[0]
+    pose.orientation.y = orientation[1]
+    pose.orientation.z = orientation[2]
+    pose.orientation.w = orientation[3]
+
+    return pose
+
+
+def roll_candidates(step_deg, max_deg, previous_roll):
+    """
+    Roll angles (radians) to try at a waypoint: every step_deg
+    within +/-max_deg, ordered by angular closeness to the roll
+    used at the previous waypoint, so the image orientation drifts
+    as little as possible between consecutive photos.
+    """
+
+    step = math.radians(step_deg)
+    limit = math.radians(min(max_deg, 180.0)) + 1e-9
+
+    rolls = [0.0]
+
+    k = 1
+    while k * step <= limit:
+        rolls.append(k * step)
+        if k * step < math.pi - 1e-9:
+            # -180 deg duplicates +180 deg - keep only one.
+            rolls.append(-k * step)
+        k += 1
+
+    def circular_distance(roll):
+        delta = abs(roll - previous_roll) % (2.0 * math.pi)
+        return min(delta, 2.0 * math.pi - delta)
+
+    return sorted(rolls, key=circular_distance)
+
+
 def create_arc_waypoints(
         start_pose,
         center,
@@ -335,22 +417,33 @@ def create_arc_waypoints(
         track_object,
         direction):
     """
-    Generates flange waypoints so the LENS orbits the object
-    (sphere center) at constant distance, sweeping an arc in the
-    world Y-Z plane.
+    Generates one waypoint spec per arc stop so the LENS orbits the
+    object (sphere center) at constant distance, sweeping an arc in
+    the world Y-Z plane.
 
     +Y = right
     +Z = up
+
+    Each spec is a dict:
+      pose        - flange pose at zero image roll (the pose the
+                    fixed-roll behavior uses);
+      lens_target - world lens position at this stop;
+      camera_axis - world unit vector the camera looks along
+                    (lens -> object);
+      q_aim       - flange orientation quaternion at zero roll.
+    With track_object=False the last three are None.
 
     With track_object=True the whole start pose is rotated rigidly
     about the object center around the world X axis by
     -direction*theta: the lens keeps its exact starting distance
     and stays aimed at the object at every waypoint, whatever its
-    offset from the flange, and the camera never rolls. The camera
-    starts looking at the object (straight down at the start
-    pose) and descends along the sphere toward -Y (direction=-1,
-    the default) or +Y (direction=+1); at 90 degrees it looks at
-    the object from the side, beyond that from underneath.
+    offset from the flange. The camera starts looking at the object
+    (straight down at the start pose) and descends along the sphere
+    toward -Y (direction=-1, the default) or +Y (direction=+1); at
+    90 degrees it looks at the object from the side, beyond that
+    from underneath. The zero-roll pose is the baseline; the caller
+    can re-roll it about camera_axis with make_flange_pose without
+    disturbing the lens position or the aim.
 
     With track_object=False the orientation stays frozen: the LENS
     still orbits the center, and the flange keeps its constant
@@ -372,6 +465,9 @@ def create_arc_waypoints(
     delta_lens = lens_start - center
     lens_offset_world = lens_start - flange_start
 
+    axis_start = center - lens_start
+    axis_start = axis_start / np.linalg.norm(axis_start)
+
     waypoints = []
 
     total_angle = math.radians(arc_degrees)
@@ -387,12 +483,30 @@ def create_arc_waypoints(
 
         theta = total_angle * float(index) / float(number_of_points)
 
+        spec = {
+            "lens_target": None,
+            "camera_axis": None,
+            "q_aim": None
+        }
+
         if track_object:
             # Rotate the whole pose (flange position + orientation)
             # about the object center: the rigidly-attached lens
             # follows, staying at 'radius' and aimed at the object.
             position = center + rotate_about_x(
                 delta_flange, -direction * theta
+            )
+
+            spec["lens_target"] = center + rotate_about_x(
+                delta_lens, -direction * theta
+            )
+            spec["camera_axis"] = rotate_about_x(
+                axis_start, -direction * theta
+            )
+            spec["q_aim"] = compute_aim_orientation(
+                start_pose.orientation,
+                theta,
+                direction
             )
         else:
             # Frozen orientation: the lens orbits the center, and
@@ -410,18 +524,16 @@ def create_arc_waypoints(
         waypoint.position.z = position[2]
 
         if track_object:
-            orientation = compute_aim_orientation(
-                start_pose.orientation,
-                theta,
-                direction
-            )
+            orientation = spec["q_aim"]
 
             waypoint.orientation.x = orientation[0]
             waypoint.orientation.y = orientation[1]
             waypoint.orientation.z = orientation[2]
             waypoint.orientation.w = orientation[3]
 
-        waypoints.append(waypoint)
+        spec["pose"] = waypoint
+
+        waypoints.append(spec)
 
         rospy.loginfo(
             "Waypoint %d/%d - angle %.2f deg - "
@@ -1043,33 +1155,63 @@ def move_to_joint_position(move_group, joint_position):
     return True
 
 
-def move_to_pose(move_group, robot, target_pose, index, total_points):
+def move_to_pose(move_group, robot, candidates, index, total_points):
     """
-    Moves toward a single Cartesian waypoint.
+    Moves toward a single Cartesian waypoint, given as a list of
+    (roll, pose) candidates that all put the lens at the same place
+    aiming at the object, differing only in the image roll (a
+    single entry when the roll is fixed).
 
-    Tries a straight-line Cartesian segment first (reliable for the
-    small distances between consecutive waypoints), then falls back
-    to regular pose-target planning. If the controller reports
+    Tries a straight-line Cartesian segment for each candidate in
+    order (reliable for the small distances between consecutive
+    waypoints) and executes the first fully-feasible one; if none
+    is, falls back to regular pose-target planning on the candidate
+    whose segment got the furthest. If the controller reports
     failure but the end-effector is within tolerance of the target,
     the waypoint is considered reached.
+
+    Returns the roll (radians) of the pose that was reached, or
+    None on failure.
     """
 
     rospy.loginfo(
-        "Planning waypoint %d/%d...",
+        "Planning waypoint %d/%d (%d roll candidate%s)...",
         index,
-        total_points
+        total_points,
+        len(candidates),
+        "" if len(candidates) == 1 else "s"
     )
 
     move_group.set_start_state_to_current_state()
 
     success = False
 
-    (plan, fraction) = plan_cartesian_segment(
-        move_group,
-        target_pose
-    )
+    best_roll = candidates[0][0]
+    best_pose = candidates[0][1]
+    best_fraction = -1.0
 
-    if fraction >= CARTESIAN_MIN_FRACTION:
+    for roll, pose in candidates:
+
+        (plan, fraction) = plan_cartesian_segment(move_group, pose)
+
+        if fraction > best_fraction:
+            best_roll = roll
+            best_pose = pose
+            best_fraction = fraction
+
+        if fraction < CARTESIAN_MIN_FRACTION:
+            continue
+
+        best_roll = roll
+        best_pose = pose
+
+        if len(candidates) > 1:
+            rospy.loginfo(
+                "Waypoint %d: Cartesian segment feasible with "
+                "image roll %.1f deg.",
+                index,
+                math.degrees(roll)
+            )
 
         plan = retime_plan(move_group, robot, plan)
 
@@ -1084,16 +1226,19 @@ def move_to_pose(move_group, robot, target_pose, index, total_points):
             )
 
         move_group.stop()
+        break
 
     else:
         rospy.logwarn(
-            "Cartesian segment for waypoint %d only %.0f%% feasible. "
+            "No Cartesian segment for waypoint %d is fully "
+            "feasible (best %.0f%% at image roll %.1f deg). "
             "Falling back to pose-target planning.",
             index,
-            fraction * 100.0
+            best_fraction * 100.0,
+            math.degrees(best_roll)
         )
 
-        if fraction <= 0.0:
+        if best_fraction <= 0.0:
             rospy.logwarn(
                 "0%% feasible usually means the current state is "
                 "considered in collision - e.g. the keep-out sphere "
@@ -1102,7 +1247,7 @@ def move_to_pose(move_group, robot, target_pose, index, total_points):
                 "check."
             )
 
-    if not success and target_reached(move_group, target_pose):
+    if not success and target_reached(move_group, best_pose):
         rospy.logwarn(
             "Controller reported failure but waypoint %d is within "
             "tolerance. Continuing.",
@@ -1113,13 +1258,15 @@ def move_to_pose(move_group, robot, target_pose, index, total_points):
     if not success:
 
         rospy.loginfo(
-            "Pose-target planning for waypoint %d/%d...",
+            "Pose-target planning for waypoint %d/%d (image roll "
+            "%.1f deg)...",
             index,
-            total_points
+            total_points,
+            math.degrees(best_roll)
         )
 
         move_group.set_start_state_to_current_state()
-        move_group.set_pose_target(target_pose)
+        move_group.set_pose_target(best_pose)
 
         try:
             success = move_group.go(wait=True)
@@ -1133,7 +1280,7 @@ def move_to_pose(move_group, robot, target_pose, index, total_points):
         move_group.stop()
         move_group.clear_pose_targets()
 
-    if not success and target_reached(move_group, target_pose):
+    if not success and target_reached(move_group, best_pose):
         rospy.logwarn(
             "Controller reported failure but waypoint %d is within "
             "tolerance. Continuing.",
@@ -1147,7 +1294,7 @@ def move_to_pose(move_group, robot, target_pose, index, total_points):
             index,
             total_points
         )
-        return False
+        return None
 
     rospy.loginfo(
         "Waypoint %d/%d reached.",
@@ -1155,7 +1302,7 @@ def move_to_pose(move_group, robot, target_pose, index, total_points):
         total_points
     )
 
-    return True
+    return best_roll
 
 
 def print_current_pose(move_group, label):
@@ -1260,12 +1407,33 @@ def main():
 
     # The hand rotates along the arc so the camera always faces the
     # object (confirmed after testing: a fixed world orientation
-    # makes the far waypoints physically unreachable). The camera
-    # never rolls, so the photos' rotation stays consistent.
+    # makes the far waypoints physically unreachable).
     # _track_object:=false keeps the orientation frozen instead.
     track_object = rospy.get_param(
         "~track_object",
         True
+    )
+
+    # With _track_object:=true the image roll about the camera axis
+    # is free by default: each waypoint tries the rolls nearest the
+    # previous waypoint's roll first and moves to the first pose
+    # the arm can reach. The roll never moves the lens or the aim
+    # (the object stays centered in frame) and the CSV records the
+    # orientation actually reached, which is what reconstruction
+    # needs. _free_roll:=false restores the fixed zero-roll poses.
+    free_roll = rospy.get_param(
+        "~free_roll",
+        FREE_ROLL
+    )
+
+    roll_step_deg = rospy.get_param(
+        "~roll_step_deg",
+        ROLL_STEP_DEG
+    )
+
+    roll_max_deg = rospy.get_param(
+        "~roll_max_deg",
+        ROLL_MAX_DEG
     )
 
     object_radius = rospy.get_param(
@@ -1379,6 +1547,18 @@ def main():
     )
     rospy.loginfo("Number of waypoints: %d", number_of_points)
     rospy.loginfo("Camera tracks the object: %s", track_object)
+    if track_object:
+        if free_roll:
+            rospy.loginfo(
+                "Image roll: free (step %.0f deg, up to +/-%.0f "
+                "deg about the camera axis)",
+                roll_step_deg,
+                roll_max_deg
+            )
+        else:
+            rospy.loginfo(
+                "Image roll: fixed (zero roll at every waypoint)"
+            )
     rospy.loginfo(
         "Keep-out sphere radius: %.4f m (0 = disabled)",
         object_radius
@@ -1431,6 +1611,16 @@ def main():
         rospy.logerr(
             "The radius must be greater than zero, got %.4f m.",
             radius
+        )
+
+        moveit_commander.roscpp_shutdown()
+        return 1
+
+    if free_roll and roll_step_deg <= 0.0:
+        rospy.logerr(
+            "_roll_step_deg must be greater than zero with "
+            "_free_roll:=true, got %.2f.",
+            roll_step_deg
         )
 
         moveit_commander.roscpp_shutdown()
@@ -1746,7 +1936,9 @@ def main():
         "start the arc." % (total_points, radius * 100.0)
     )
 
-    for index, waypoint in enumerate(waypoints, start=1):
+    last_roll = 0.0
+
+    for index, spec in enumerate(waypoints, start=1):
 
         if rospy.is_shutdown():
             rospy.logwarn(
@@ -1760,15 +1952,39 @@ def main():
             total_points
         )
 
-        success = move_to_pose(
+        if track_object and free_roll:
+            # Same lens position and aim for every candidate; only
+            # the image roll differs, nearest the previous
+            # waypoint's roll first.
+            candidates = [
+                (
+                    roll,
+                    make_flange_pose(
+                        spec["lens_target"],
+                        spec["camera_axis"],
+                        spec["q_aim"],
+                        roll,
+                        lens_xyz
+                    )
+                )
+                for roll in roll_candidates(
+                    roll_step_deg,
+                    roll_max_deg,
+                    last_roll
+                )
+            ]
+        else:
+            candidates = [(0.0, spec["pose"])]
+
+        reached_roll = move_to_pose(
             move_group=move_group,
             robot=robot,
-            target_pose=waypoint,
+            candidates=candidates,
             index=index,
             total_points=total_points
         )
 
-        if not success:
+        if reached_roll is None:
             rospy.logerr(
                 "Trajectory stopped at waypoint %d. Poses recorded "
                 "so far are kept in %s",
@@ -1779,6 +1995,8 @@ def main():
             log_handle.close()
             moveit_commander.roscpp_shutdown()
             return 1
+
+        last_roll = reached_roll
 
         print_current_pose(
             move_group,
