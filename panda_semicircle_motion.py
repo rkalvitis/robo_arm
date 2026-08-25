@@ -167,10 +167,11 @@ OBJECT_RADIUS_RATIO = 0.5
 KEEPOUT_OBJECT_NAME = "object_keepout"
 
 # The object sits on a thin vertical rod (3 mm diameter = 1.5 mm
-# radius) reaching up from the ground. Modeled with a safety
-# margin; 0 disables it.
+# radius) reaching up from the ground. Modeled at its TRUE size
+# per the user's decision 2026-08-25 (no planning margin - the
+# 5 mm padded default blocked the low waypoints); 0 disables it.
 ROD_OBJECT_NAME = "support_rod"
-SUPPORT_ROD_RADIUS = 0.005
+SUPPORT_ROD_RADIUS = 0.0015
 
 # White background screen behind the insect
 # (background-white-screen.stl, modeled in METERS): a half-

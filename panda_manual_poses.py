@@ -26,22 +26,28 @@ RUN MODE (default) - the arm steps through the recorded poses:
     rosrun panda_moveit_ctrl panda_manual_poses.py _execute:=true
 
   1. attaches the phone holder as collision geometry;
-  2. if _object_xyz is given, builds the obstacle scene around it
-     (keep-out sphere, support rod, background screen - same
-     params as panda_semicircle_motion.py) so the moves BETWEEN
-     poses are collision-checked against it. The demonstrated
-     poses themselves were physically shown, but the planner may
-     still refuse one that sits within a safety margin - shrink
-     the margins or drop the obstacle in that case;
-  3. moves to pose 1 with a joint-space plan, then ALWAYS waits
-     for Enter (place/check the object);
-  4. visits poses 2..N: joint-space plan to the exact recorded
-     joints, CSV log per pose (same format as the arc script),
-     photo pause between poses (_confirm_each_pose:=true = Enter,
-     otherwise _wait_between_points seconds);
-  5. with _return_to_start:=true (default) returns by revisiting
-     the recorded poses in reverse - also after an abort, using
-     the poses reached so far.
+  2. moves to the INITIAL pose from _joint_file (joint_start.csv,
+     same file as the arc script) with a joint-space plan - every
+     run starts AND ends there;
+  3. determines the object position: _object_xyz if given,
+     otherwise computed from the reached initial pose exactly
+     like the arc script places it - _object_distance (default
+     3 cm) in front of the lens along the camera axis. The
+     obstacle scene (keep-out sphere, support rod, background
+     screen) is built around it so the moves between poses are
+     collision-checked. The demonstrated poses were physically
+     shown, but the planner may still refuse one that sits within
+     a safety margin - shrink the margin or drop that obstacle;
+  4. ALWAYS waits for Enter at the initial pose (place/check the
+     object at the logged position);
+  5. visits poses 1..N: joint-space plan to the exact recorded
+     joints, CSV log per pose (initial pose = row 0, same format
+     as the arc script), photo pause between poses
+     (_confirm_each_pose:=true = Enter, otherwise
+     _wait_between_points seconds);
+  6. ALWAYS returns: after the last pose (and its photo pause),
+     or after an abort, the arm revisits the reached poses in
+     reverse and finishes at the initial pose.
 """
 
 from __future__ import print_function
@@ -246,15 +252,16 @@ def build_obstacles(scene, move_group, robot, object_xyz,
     return True
 
 
-def return_along_poses(move_group, reached_poses):
+def return_along_poses(move_group, reached_poses, init_joints):
     """
-    Revisits the recorded poses in reverse (excluding the one the
-    arm currently sits at) with joint-space plans, ending at
-    pose 1. reached_poses = the poses successfully visited so far,
-    in forward order.
+    Revisits the reached poses in reverse with joint-space plans
+    and finishes at the initial pose. reached_poses = the poses
+    successfully visited so far, in forward order (the arm sits at
+    or near the last one; revisiting it first is a cheap no-op
+    that also recovers from a partially-failed move).
     """
 
-    for index in range(len(reached_poses) - 2, -1, -1):
+    for index in range(len(reached_poses) - 1, -1, -1):
 
         if rospy.is_shutdown():
             rospy.logwarn("ROS shut down. Stopping the return.")
@@ -271,7 +278,14 @@ def return_along_poses(move_group, reached_poses):
             )
             return False
 
-    return True
+    if rospy.is_shutdown():
+        return False
+
+    return arc.move_to_joint_position(
+        move_group,
+        init_joints,
+        label="the initial pose (return)"
+    )
 
 
 def main():
@@ -328,16 +342,21 @@ def main():
         "~confirm_each_pose", arc.CONFIRM_EACH_POSE
     )
 
-    return_to_start = rospy.get_param(
-        "~return_to_start", arc.RETURN_TO_START
+    # Initial pose: every run starts AND ends here (same file the
+    # arc script uses).
+    joint_file = rospy.get_param(
+        "~joint_file",
+        os.path.join(script_dir, "joint_start.csv")
     )
 
-    # World position of the object, 'x,y,z' in the planning frame
-    # (e.g. from the arc script's "Object (sphere center)" log or
-    # from calibrate_lens.py's solved object). '' = no obstacle
-    # scene: moves between poses are only checked against the
-    # robot itself and the attached holder.
+    # World position of the object, 'x,y,z' in the planning frame.
+    # '' (default) = computed from the reached initial pose:
+    # _object_distance in front of the lens along the camera axis,
+    # exactly like the arc script places it.
     object_xyz_text = rospy.get_param("~object_xyz", "")
+
+    # Lens-object distance used when _object_xyz is not given.
+    object_distance = rospy.get_param("~object_distance", 0.03)
 
     object_radius = rospy.get_param("~object_radius", 0.02)
     rod_radius = rospy.get_param("~rod_radius",
@@ -374,15 +393,29 @@ def main():
     holder_yaw_deg = rospy.get_param("~holder_yaw_deg",
                                      arc.HOLDER_YAW_DEG)
 
-    # Lens transform, used ONLY for the lens_x/y/z CSV columns.
+    # Lens transform: used for the lens_x/y/z CSV columns and for
+    # deriving the default object position from the initial pose.
     lens_xyz_text = rospy.get_param("~lens_xyz",
                                     arc.LENS_XYZ_LINK8)
+    lens_axis_text = rospy.get_param("~lens_axis",
+                                     arc.LENS_AXIS_LINK8)
     try:
         lens_xyz = np.array(
             arc.parse_vector3(lens_xyz_text, "_lens_xyz")
         )
+        lens_axis = np.array(
+            arc.parse_vector3(lens_axis_text, "_lens_axis")
+        )
     except ValueError as error:
-        rospy.logerr("Invalid _lens_xyz: %s", str(error))
+        rospy.logerr("Invalid lens parameter: %s", str(error))
+        moveit_commander.roscpp_shutdown()
+        return 1
+
+    if object_distance <= 0.0:
+        rospy.logerr(
+            "_object_distance must be greater than zero, got %.4f",
+            object_distance
+        )
         moveit_commander.roscpp_shutdown()
         return 1
 
@@ -415,16 +448,28 @@ def main():
         moveit_commander.roscpp_shutdown()
         return 1
 
+    try:
+        init_joints = arc.load_joint_position(joint_file)
+    except Exception as error:
+        rospy.logerr("Error reading the joint file: %s", str(error))
+        moveit_commander.roscpp_shutdown()
+        return 1
+
     total = len(poses)
 
     rospy.loginfo("Poses file: %s (%d poses)", poses_file, total)
+    rospy.loginfo("Initial pose file: %s", joint_file)
     rospy.loginfo("Execution enabled: %s", execute_motion)
     rospy.loginfo(
         "Object position: %s",
         "({:.4f}, {:.4f}, {:.4f})".format(*object_xyz)
-        if object_xyz else "not given - no obstacle scene"
+        if object_xyz else
+        "computed at the initial pose, %.1f cm in front of the "
+        "lens" % (object_distance * 100.0)
     )
-    rospy.loginfo("Return to pose 1 at the end: %s", return_to_start)
+    rospy.loginfo(
+        "The run always starts and ends at the initial pose."
+    )
     rospy.loginfo("Recording poses to: %s", output_file)
 
     move_group.set_max_velocity_scaling_factor(arc.VELOCITY_SCALE)
@@ -465,27 +510,50 @@ def main():
         "is available."
     )
 
-    # Remove stale obstacles from previous runs, then build the
-    # scene BEFORE any motion so even the move to pose 1 is
-    # collision-checked against it.
+    # Remove stale obstacles left over from previous runs.
     scene.remove_world_object(arc.KEEPOUT_OBJECT_NAME)
     scene.remove_world_object(arc.ROD_OBJECT_NAME)
     scene.remove_world_object(arc.SCREEN_OBJECT_NAME)
     rospy.sleep(0.5)
 
-    if object_xyz is not None:
-        if not build_obstacles(
-                scene, move_group, robot, object_xyz,
-                object_radius, rod_radius, object_height,
-                screen_mesh, screen_scale, screen_height,
-                screen_yaw_deg, keepout_ignored_links):
-            moveit_commander.roscpp_shutdown()
-            return 1
-    else:
-        rospy.logwarn(
-            "No _object_xyz given: moves between poses are only "
-            "checked against the robot and the attached holder."
+    # Every run starts at the initial pose.
+    if not arc.move_to_joint_position(
+            move_group,
+            init_joints,
+            label="the initial pose (joint_start.csv)"):
+        moveit_commander.roscpp_shutdown()
+        return 1
+
+    rospy.sleep(arc.WAIT_AFTER_INITIAL_POSITION)
+
+    arc.print_current_pose(move_group, "Initial pose reached")
+
+    start_pose = copy.deepcopy(move_group.get_current_pose().pose)
+
+    if object_xyz is None:
+        # Same placement rule as the arc script: the object sits
+        # _object_distance in front of the lens at the initial
+        # pose.
+        _, _, center_np = arc.compute_camera_geometry(
+            start_pose, lens_xyz, lens_axis, object_distance
         )
+        object_xyz = [center_np[0], center_np[1], center_np[2]]
+
+        rospy.loginfo(
+            "Object position derived from the initial pose: "
+            "x=%.6f, y=%.6f, z=%.6f (%.1f cm in front of the "
+            "lens)",
+            object_xyz[0], object_xyz[1], object_xyz[2],
+            object_distance * 100.0
+        )
+
+    if not build_obstacles(
+            scene, move_group, robot, object_xyz,
+            object_radius, rod_radius, object_height,
+            screen_mesh, screen_scale, screen_height,
+            screen_yaw_deg, keepout_ignored_links):
+        moveit_commander.roscpp_shutdown()
+        return 1
 
     try:
         log_handle, log_writer = arc.open_pose_log(output_file)
@@ -493,6 +561,19 @@ def main():
         rospy.logerr("Unable to open the output file: %s", str(error))
         moveit_commander.roscpp_shutdown()
         return 1
+
+    # The initial pose is recorded as row 0, like the arc script.
+    arc.log_current_pose(
+        log_handle, log_writer, move_group, 0, 0.0, lens_xyz
+    )
+
+    # Object placement/check moment, always confirmed.
+    arc.wait_for_enter(
+        "Robot at the initial pose, %d recorded poses ready. "
+        "Place/check the object at the logged position and the "
+        "framing on the phone, clear the workspace, then confirm "
+        "to start." % total
+    )
 
     reached_poses = []
     aborted = False
@@ -527,14 +608,7 @@ def main():
             lens_xyz
         )
 
-        if index == 1:
-            # Object placement/check moment, always confirmed.
-            arc.wait_for_enter(
-                "Pose 1 reached (%d poses total). Place/check the "
-                "object and the framing on the phone, clear the "
-                "workspace, then confirm to continue." % total
-            )
-        elif index < total:
+        if index < total:
             if confirm_each_pose:
                 arc.wait_for_enter(
                     "Pose %d/%d done - take the photo, then "
@@ -554,24 +628,27 @@ def main():
 
     rospy.loginfo("Joint values and poses saved to: %s", output_file)
 
-    if return_to_start and reached_poses and not rospy.is_shutdown():
+    # The run ALWAYS ends at the initial pose (also after an
+    # abort, over the poses reached so far).
+    if not rospy.is_shutdown():
 
-        if not aborted:
+        if not aborted and reached_poses:
             if confirm_each_pose:
                 arc.wait_for_enter(
                     "Last pose done - take the final photo, then "
-                    "confirm to return to pose 1."
+                    "confirm to return to the initial pose."
                 )
             else:
                 rospy.sleep(wait_between_points)
 
         rospy.loginfo(
-            "Returning to pose 1 through the recorded poses in "
-            "reverse..."
+            "Returning to the initial pose through the reached "
+            "poses in reverse..."
         )
 
-        if return_along_poses(move_group, reached_poses):
-            rospy.loginfo("Back at pose 1.")
+        if return_along_poses(move_group, reached_poses,
+                              init_joints):
+            rospy.loginfo("Back at the initial pose.")
         else:
             rospy.logerr("Return incomplete.")
 

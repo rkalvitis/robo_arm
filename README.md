@@ -87,7 +87,7 @@ All are private ROS params (`_name:=value`):
 | `_roll_max_deg` | `180.0` | Maximum roll magnitude tried, ± around zero; `180` = full freedom (with `_free_roll:=true`) |
 | `_object_radius` | `0.5 × _radius` (m) | Radius of the keep-out collision sphere around the object. **A value in meters** (the 0.5 is a ratio, only used for the default). `0` disables it; must be smaller than `_radius` |
 | `_keepout_ignored_links` | hand + finger links incl. `*_sc` capsule variants | Links allowed to touch the keep-out sphere (the hand carries the camera and must get that close); the rest of the arm is still kept out. The script also auto-detects and exempts (with a warning) any link still in contact with the sphere at the start pose |
-| `_rod_radius` | `0.005` (m) | Radius of the collision cylinder for the object's **support rod** (real rod is 3 mm **diameter** = 1.5 mm radius; default includes a 3.5 mm margin). Vertical, from the ground to the object; **no link is exempt from it**. `0` disables. The default margin blocks waypoint 8 of the 160° arc (diagnosed in sim 2026-08-25) — `_rod_radius:=0.003` still leaves 1.5 mm clearance |
+| `_rod_radius` | `0.0015` (m) | Radius of the collision cylinder for the object's **support rod**, modeled at its TRUE size (3 mm diameter; no planning margin — the old 5 mm padded default blocked waypoint 8 of the 160° arc, diagnosed in sim 2026-08-25). Vertical, from the ground to the object; **no link is exempt from it**. `0` disables |
 | `_object_height` | `0.58` (m) | Height of the object above the **ground** = length of the support rod (real setup measured 2026-08-25: 58 cm) (the rod hangs that far below the object in the planning scene, always at full height) |
 | `_screen_mesh` | `background-white-screen.stl` next to the script | STL (binary, in **meters**) of the white **background screen**: a half-cylinder shell (wall radius 11–11.25 cm, 19.4 cm tall) with a 6 mm floor plate whose Ø4.4 mm hole sits at the arc center — the hole slides over the support rod, so the screen is placed at the object's x/y and the insect sits at the center of the semicircle. Added as a **world obstacle: no link may touch it** (unlike the keep-out sphere). **Copy the STL to the robot PC next to the script**, or the script exits with an error. `''` disables it |
 | `_screen_height` | `0.425` (m) | Height of the screen's **bottom** above the ground (with the defaults the screen spans 42.5–61.9 cm, so the 58 cm insect sits inside it; the rim ends up above the starting lens height — the phone works inside the enclosure on upper waypoints, and MoveIt vetoes any pose where the holder would touch the wall) |
@@ -121,21 +121,22 @@ row of 7 joint values per pose; `_poses_file` overrides the path).
 **Run them:**
 
 ```bash
-rosrun panda_moveit_ctrl panda_manual_poses.py _execute:=true \
-  _confirm_each_pose:=true _object_xyz:='0.343,0.121,0.58'
+rosrun panda_moveit_ctrl panda_manual_poses.py _execute:=true _confirm_each_pose:=true
 ```
 
-Moves to pose 1 (joint-space plan), always waits for Enter (object placement/check), then
-visits poses 2..N with photo pauses and the same CSV pose logging as the arc script, and
-returns through the poses in reverse at the end — also after an abort, using the poses
-reached so far (`_return_to_start:=false` disables). `_object_xyz` (world frame, e.g. from
-the arc script's "Object (sphere center)" log line) builds the obstacle scene (keep-out
-sphere `_object_radius` 0.02, rod, screen — same params as the arc script) so the moves
-*between* poses are collision-checked; omit it to skip obstacles entirely. Note the planner
-may refuse a demonstrated pose that sits within an obstacle's safety margin — shrink the
-margin (e.g. `_rod_radius:=0.002`) or drop that obstacle. The phone holder is attached as
-collision geometry either way. `panda_semicircle_motion.py` is unchanged and remains
-available.
+Every run **starts and ends at the initial pose** from `_joint_file` (`joint_start.csv`,
+same file as the arc script): the arm moves there first, the object position is determined
+(`_object_xyz` if given; otherwise computed like the arc script places it —
+`_object_distance`, default 3 cm, in front of the lens along the camera axis at the initial
+pose), the obstacle scene (keep-out sphere `_object_radius` 0.02, rod at its true 1.5 mm,
+screen) is built around it, and the script waits for Enter (place/check the object at the
+logged position). It then visits poses 1..N at the exact recorded joints with photo pauses
+and the same CSV logging as the arc script (initial pose = row 0), and **always returns**:
+after the last pose — or after an abort, over the poses reached so far — the arm revisits
+the poses in reverse and finishes at the initial pose. Note the planner may refuse a
+demonstrated pose that sits within an obstacle's margin — shrink the margin or drop that
+obstacle. The phone holder is attached as collision geometry either way.
+`panda_semicircle_motion.py` is unchanged and remains available.
 
 ## Lens calibration (`calibrate_lens.py`)
 
