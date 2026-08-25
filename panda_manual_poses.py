@@ -862,6 +862,9 @@ def main():
             move_group,
             init_joints,
             label="the initial pose (joint_start.csv)"):
+        diagnose_target_state(
+            robot, init_joints, "the initial pose"
+        )
         moveit_commander.roscpp_shutdown()
         return 1
 
