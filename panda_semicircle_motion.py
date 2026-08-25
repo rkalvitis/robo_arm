@@ -47,10 +47,16 @@ The script:
    (take the photo, press Enter, the arm moves on);
 9. after the last waypoint (final photo: Enter with
    _confirm_each_pose:=true, _wait_between_points pause
-   otherwise), plans a joint-space move back to the initial
-   configuration with all obstacles (sphere, rod, screen) still in
-   the planning scene - _return_to_start:=false leaves the arm at
-   the last waypoint instead. Skipped if the arc was aborted.
+   otherwise), returns to the initial configuration by RETRACING
+   the executed stops in reverse - the exact corridor that was
+   just driven forward, so the return keeps the same clearances
+   to the object, rod and screen as the photo pass (a direct
+   joint-space plan could legally sweep the hand through the
+   keep-out sphere, which is ACM-exempt for the hand). When the
+   arc aborts at an unfeasible waypoint, the stops reached so far
+   are retraced back to the start the same way.
+   _return_to_start:=false leaves the arm at the last waypoint
+   instead.
 
 Example joint_start.csv:
 
@@ -122,11 +128,14 @@ WAIT_AFTER_INITIAL_POSITION = 2.0
 # the arc starts.
 CONFIRM_EACH_POSE = False
 
-# After the last waypoint the robot plans a collision-aware
-# joint-space move back to the initial configuration (the
-# obstacles stay in the planning scene). Only runs when the whole
-# arc completed; a run aborted at a waypoint leaves the arm where
-# it stopped.
+# After the last waypoint the robot returns to the initial
+# configuration by retracing the executed stops in reverse - the
+# same corridor that was just driven forward, so the return keeps
+# the clearances of the photo pass. (A direct joint-space plan is
+# NOT safe here: the keep-out sphere is ACM-exempt for the hand,
+# so such a plan may sweep the phone through the object region.)
+# Also runs when the arc aborts at an unfeasible waypoint: the
+# stops reached so far are retraced back to the start.
 RETURN_TO_START = True
 
 VELOCITY_SCALE = 0.05
@@ -1260,12 +1269,13 @@ def retime_plan(move_group, robot, plan):
         )
 
 
-def move_to_joint_position(move_group, joint_position):
+def move_to_joint_position(move_group, joint_position,
+                           label="the initial joint position"):
     """
     Moves the robot to the specified joint configuration.
     """
 
-    rospy.loginfo("Moving to the initial joint position...")
+    rospy.loginfo("Moving to %s...", label)
 
     move_group.set_joint_value_target(joint_position)
 
@@ -1300,18 +1310,20 @@ def move_to_joint_position(move_group, joint_position):
 
         if max_error <= JOINT_REACHED_TOLERANCE:
             rospy.logwarn(
-                "Controller reported failure but the initial joint "
-                "position is within tolerance. Continuing."
+                "Controller reported failure but %s is within "
+                "tolerance. Continuing.",
+                label
             )
             success = True
 
     if not success:
         rospy.logerr(
-            "Unable to reach the initial joint position."
+            "Unable to reach %s.",
+            label
         )
         return False
 
-    rospy.loginfo("Initial joint position reached.")
+    rospy.loginfo("Reached %s.", label)
 
     return True
 
@@ -1464,6 +1476,97 @@ def move_to_pose(move_group, robot, candidates, index, total_points):
     )
 
     return best_roll
+
+
+def return_along_recorded_stops(move_group, robot, recorded_stops):
+    """
+    Drives the arm back to the initial configuration by retracing
+    the executed stops in reverse - the exact corridor that was
+    just driven (and physically cleared) forward, so the return
+    keeps the same distances to the object, rod and screen as the
+    photo pass did. This is deliberately NOT a fresh joint-space
+    plan to the start: the keep-out sphere is ACM-exempt for the
+    hand links, so a free plan may legally sweep the phone through
+    the object region.
+
+    recorded_stops[0] is the initial pose, the last entry is the
+    stop the arm currently sits at - or, after an aborted
+    waypoint, the last stop that WAS reached: the first reverse
+    segment then simply moves back onto the corridor. Each entry
+    is (joints, pose) as actually reached. Every reverse segment
+    is planned as a straight Cartesian line to that stop's pose;
+    if that is not feasible, a collision-checked joint-space move
+    to the stop's recorded joints is used instead.
+
+    Returns True when the arm is back at the initial stop.
+    """
+
+    for stop_index in range(len(recorded_stops) - 1, -1, -1):
+
+        if rospy.is_shutdown():
+            rospy.logwarn(
+                "ROS shut down. Stopping the return."
+            )
+            return False
+
+        joints, pose = recorded_stops[stop_index]
+
+        rospy.loginfo(
+            "Returning: stop %d of %d...",
+            stop_index,
+            len(recorded_stops) - 1
+        )
+
+        move_group.set_start_state_to_current_state()
+
+        success = False
+
+        (plan, fraction) = plan_cartesian_segment(move_group, pose)
+
+        if fraction >= CARTESIAN_MIN_FRACTION:
+
+            plan = retime_plan(move_group, robot, plan)
+
+            try:
+                success = move_group.execute(plan, wait=True)
+            except Exception as error:
+                rospy.logwarn(
+                    "Error while retracing to stop %d: %s",
+                    stop_index,
+                    str(error)
+                )
+
+            move_group.stop()
+
+        if not success and target_reached(move_group, pose):
+            success = True
+
+        if not success:
+            rospy.logwarn(
+                "Cartesian retrace to stop %d not feasible "
+                "(%.0f%%) - planning a joint-space move to its "
+                "recorded joints instead.",
+                stop_index,
+                fraction * 100.0
+            )
+
+            success = move_to_joint_position(
+                move_group,
+                joints,
+                label="the recorded joints of stop {}".format(
+                    stop_index
+                )
+            )
+
+        if not success:
+            rospy.logerr(
+                "Return stopped before stop %d - the arm stays "
+                "where it is.",
+                stop_index
+            )
+            return False
+
+    return True
 
 
 def print_current_pose(move_group, label):
@@ -1624,10 +1727,11 @@ def main():
         SUPPORT_ROD_RADIUS
     )
 
-    # Height of the object above the ground = length of the rod.
+    # Height of the object above the ground = length of the rod
+    # (real setup measured 2026-08-25: 58 cm).
     object_height = rospy.get_param(
         "~object_height",
-        0.55
+        0.58
     )
 
     # White background screen mesh (world obstacle, the floor hole
@@ -2021,6 +2125,13 @@ def main():
         move_group.get_current_pose().pose
     )
 
+    # Executed stops (joints + pose actually reached), used to
+    # retrace the corridor in reverse for the return move.
+    recorded_stops = [(
+        list(move_group.get_current_joint_values()),
+        copy.deepcopy(start_pose)
+    )]
+
     try:
         log_handle, log_writer = open_pose_log(output_file)
     except Exception as error:
@@ -2266,10 +2377,34 @@ def main():
             )
 
             log_handle.close()
+
+            if return_to_start and not rospy.is_shutdown():
+                rospy.loginfo(
+                    "Returning to the initial pose by retracing "
+                    "the %d stop(s) reached so far...",
+                    len(recorded_stops) - 1
+                )
+
+                if return_along_recorded_stops(
+                        move_group,
+                        robot,
+                        recorded_stops):
+                    rospy.loginfo("Back at the initial pose.")
+                else:
+                    rospy.logerr(
+                        "Return incomplete - the arm stays where "
+                        "it stopped."
+                    )
+
             moveit_commander.roscpp_shutdown()
             return 1
 
         last_roll = reached_roll
+
+        recorded_stops.append((
+            list(move_group.get_current_joint_values()),
+            copy.deepcopy(move_group.get_current_pose().pose)
+        ))
 
         print_current_pose(
             move_group,
@@ -2333,17 +2468,20 @@ def main():
             rospy.sleep(wait_between_points)
 
         rospy.loginfo(
-            "Returning to the initial pose (the obstacles stay in "
-            "the planning scene, so the plan avoids them)..."
+            "Returning to the initial pose by retracing the "
+            "executed stops in reverse (the corridor of the photo "
+            "pass, same clearances to object, rod and screen)..."
         )
 
-        if not move_to_joint_position(
+        if return_along_recorded_stops(
                 move_group,
-                initial_joint_position):
+                robot,
+                recorded_stops):
+            rospy.loginfo("Back at the initial pose.")
+        else:
             rospy.logerr(
-                "Unable to plan a collision-free return to the "
-                "initial pose - the arm stays at the last "
-                "waypoint."
+                "Return incomplete - the arm stays where it "
+                "stopped."
             )
 
     move_group.stop()
