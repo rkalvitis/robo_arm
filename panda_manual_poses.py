@@ -64,6 +64,7 @@ import rospy
 import moveit_commander
 
 from geometry_msgs.msg import Point
+from moveit_msgs.srv import GetStateValidity
 
 import panda_semicircle_motion as arc
 
@@ -252,6 +253,74 @@ def build_obstacles(scene, move_group, robot, object_xyz,
         rospy.logerr("Unable to verify state validity: %s", str(error))
 
     return True
+
+
+def diagnose_target_state(robot, joints, label):
+    """
+    Checks whether a TARGET joint configuration is itself valid in
+    the current planning scene and logs the colliding body pairs -
+    so a refused pose reports WHAT it collides with instead of
+    just failing. Also distinguishes the other failure mode: a
+    valid pose that the planner merely could not find a path to.
+    """
+
+    try:
+        rospy.wait_for_service("/check_state_validity", timeout=5.0)
+
+        check_validity = rospy.ServiceProxy(
+            "/check_state_validity",
+            GetStateValidity
+        )
+
+        state = robot.get_current_state()
+        names = list(state.joint_state.name)
+        positions = list(state.joint_state.position)
+
+        for index in range(7):
+            joint_name = "panda_joint{}".format(index + 1)
+            if joint_name in names:
+                positions[names.index(joint_name)] = joints[index]
+
+        state.joint_state.position = positions
+
+        response = check_validity(
+            robot_state=state,
+            group_name=arc.PLANNING_GROUP
+        )
+    except Exception as error:
+        rospy.logwarn(
+            "Unable to collision-check the target state of %s: %s",
+            label,
+            str(error)
+        )
+        return
+
+    if response.valid:
+        rospy.logwarn(
+            "%s itself is VALID (no collision at the target). The "
+            "failure was pathfinding (e.g. TIMED_OUT) - try again "
+            "(the planner is randomized), or record an "
+            "intermediate pose before it.",
+            label
+        )
+        return
+
+    pairs = sorted({
+        "{} <-> {}".format(
+            contact.contact_body_1,
+            contact.contact_body_2
+        )
+        for contact in response.contacts
+    })
+
+    rospy.logerr(
+        "%s is IN COLLISION in the planning scene: %s. If this "
+        "pose was physically demonstrated with the real obstacles "
+        "in place, disable the virtual one that blocks it: "
+        "_screen_mesh:=\"''\" / _rod_radius:=0 / _object_radius:=0.",
+        label,
+        "; ".join(pairs) if pairs else "no contact pair reported"
+    )
 
 
 def return_along_poses(move_group, reached_poses, init_joints):
@@ -620,6 +689,11 @@ def main():
                 "logged in %s",
                 index, total, output_file
             )
+
+            diagnose_target_state(
+                robot, joints, "pose {}".format(index)
+            )
+
             aborted = True
             break
 
