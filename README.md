@@ -111,12 +111,21 @@ same camera pose, every iteration. No lens model, no tracking math, no roll deci
 the robot):
 
 ```bash
-rosrun panda_moveit_ctrl panda_manual_poses.py _mode:=record
+rosrun panda_moveit_ctrl panda_manual_poses.py _mode:=record _execute:=true
 ```
 
 Freedrive to each photo pose (check framing on the phone), press **Enter** to record;
 `undo` removes the last pose, `done` writes `manual_poses.csv` (next to the script, one
-row of 7 joint values per pose; `_poses_file` overrides the path).
+row of 7 joint values per pose; `_poses_file` overrides the path). **If the file already
+exists it is edited, not overwritten**: the script walks through the existing poses one by
+one, and with `_execute:=true` the arm **drives to each existing pose first** so you decide
+with the real framing in view (motions at 5% speed, no obstacle scene — keep the e-stop at
+hand; after each freedrive the script clears the Franka monitored stop automatically) —
+Enter/`k` keeps a pose (the arm then drives to the next), `r` replaces it with the current
+joints, `i` inserts the current joints *before* it (the arm then drives back to the
+existing pose), `x` deletes it, `done` keeps all the remaining ones — then appends new
+poses at the end. Without `_execute:=true` the walkthrough is motionless. So inserting a helper pose between 7 and 8: keep 1–7
+(Enter ×7), freedrive to the new pose, `i` at pose 8, then `done` twice.
 
 **Run them:**
 
@@ -135,9 +144,7 @@ screen) is built around it, and the script waits for Enter (place/check the obje
 logged position). It then visits poses 1..N at the exact recorded joints with photo pauses
 and the same CSV logging as the arc script (initial pose = row 0), and **always returns**:
 after the last pose — or after an abort, over the poses reached so far — the arm revisits
-the poses in reverse and finishes at the initial pose. Note the planner may refuse a
-demonstrated pose that sits within an obstacle's margin — shrink the margin or drop that
-obstacle. The phone holder is attached as collision geometry either way.
+the poses in reverse and finishes at the initial pose. When a pose fails, the script collision-checks the *target* configuration and prints the exact colliding body pair; if the target is valid (pure pathfinding failure), it automatically retries that move once with a bigger planning budget (`_planning_time`, default 10 s per move; `_retry_planning_time`, default 60 s for the retry — the planner is randomized and anytime, so more time genuinely helps narrow passages). If even the long retry fails, record an intermediate pose. A pose refused for *collision* instead means an obstacle margin — shrink it or drop that obstacle. The phone holder is attached as collision geometry either way.
 `panda_semicircle_motion.py` is unchanged and remains available.
 
 ## Lens calibration (`calibrate_lens.py`)

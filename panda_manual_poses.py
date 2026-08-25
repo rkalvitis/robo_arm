@@ -10,16 +10,25 @@ replays exactly those configurations - same arm posture, same
 camera pose, every iteration. No lens model, no tracking math, no
 roll decisions.
 
-RECORD MODE (_mode:=record) - robot in freedrive/guiding mode,
-move_group running; this mode never moves the robot:
+RECORD MODE (_mode:=record) - move_group running:
 
-    rosrun panda_moveit_ctrl panda_manual_poses.py _mode:=record
+    rosrun panda_moveit_ctrl panda_manual_poses.py _mode:=record _execute:=true
 
   Freedrive to each photo pose (check the framing on the phone),
   press Enter to record it; 'undo' removes the last pose, 'done'
   saves the file (_poses_file, default manual_poses.csv next to
   this script; one row of 7 joint values per pose, first row =
-  first photo stop).
+  first photo stop). If the file already EXISTS its poses are NOT
+  overwritten blindly: the script walks through them one by one,
+  and with _execute:=true the arm DRIVES to each existing pose
+  first so you decide with the real framing in view (after a
+  freedrive it clears the Franka monitored stop automatically).
+  Enter/'k' keeps a pose (the arm then drives to the next one),
+  'r' replaces it with the current joints, 'i' inserts the
+  current joints before it (the arm drives back to the existing
+  pose afterwards), 'x' deletes it, 'done' keeps all the
+  remaining ones - then new poses are appended at the end.
+  Without _execute:=true the walkthrough is motionless.
 
 RUN MODE (default) - the arm steps through the recorded poses:
 
@@ -68,6 +77,14 @@ from moveit_msgs.srv import GetStateValidity
 
 import panda_semicircle_motion as arc
 
+# Only present on the robot PC (franka_ros); record-mode motion
+# uses it to clear the monitored-stop state the robot enters when
+# the guiding button is released after freedriving.
+try:
+    from franka_msgs.msg import ErrorRecoveryActionGoal
+except ImportError:
+    ErrorRecoveryActionGoal = None
+
 
 MODE_RECORD = "record"
 MODE_RUN = "run"
@@ -104,29 +121,210 @@ def load_poses(file_path):
     return [row.tolist() for row in values]
 
 
-def record_mode(move_group, poses_file):
+def current_joints(move_group):
     """
-    Interactive recording: freedrive, Enter records the current
-    joints, 'undo' drops the last pose, 'done' writes the file.
+    Reads the current 7 joint values, or None on a bad read.
+    """
+
+    joints = move_group.get_current_joint_values()
+
+    if len(joints) != 7:
+        rospy.logerr(
+            "Read %d joint values instead of 7 - not recorded.",
+            len(joints)
+        )
+        return None
+
+    return list(joints)
+
+
+def make_recovery_publisher():
+    """
+    Publisher for the Franka error-recovery action goal, or None
+    when franka_msgs is unavailable (e.g. in simulation).
+    """
+
+    if ErrorRecoveryActionGoal is None:
+        return None
+
+    return rospy.Publisher(
+        "/franka_control/error_recovery/goal",
+        ErrorRecoveryActionGoal,
+        queue_size=1
+    )
+
+
+def attempt_error_recovery(recovery_pub):
+    """
+    Best-effort clearing of the Franka monitored-stop state that
+    freedriving (guiding button) leaves behind - without it, the
+    first planned motion after a freedrive is rejected by the
+    controller. Harmless in simulation.
+    """
+
+    if recovery_pub is None:
+        return
+
+    recovery_pub.publish(ErrorRecoveryActionGoal())
+    rospy.sleep(1.0)
+
+
+def move_to_recorded(move_group, joints, label, execute,
+                     recovery_pub):
+    """
+    Drives the arm to a registered pose during record mode (after
+    clearing a freedrive stop), or logs why it will not move.
+    """
+
+    if not execute:
+        rospy.loginfo(
+            "(motion disabled - pass _execute:=true so the arm "
+            "drives to %s)",
+            label
+        )
+        return True
+
+    attempt_error_recovery(recovery_pub)
+
+    if arc.move_to_joint_position(move_group, joints, label=label):
+        return True
+
+    rospy.logwarn(
+        "Could not move to %s - you can still decide about it "
+        "(keep/replace/insert/delete), just without the arm "
+        "sitting there.",
+        label
+    )
+    return False
+
+
+def record_mode(move_group, poses_file, execute, recovery_pub):
+    """
+    Interactive recording. When the poses file already exists, its
+    poses are NOT overwritten blindly: the script walks through
+    them one by one - and (with _execute:=true) the arm DRIVES to
+    each existing pose first, so the decision is made with the
+    real framing in view: keep moves on to the next pose, replace
+    and insert take the CURRENT (freedriven) joints, delete drops
+    it. After the walkthrough, new poses are appended at the end.
+    So inserting an intermediate pose (e.g. between 7 and 8):
+    keep 1..7 (the arm steps through them), freedrive to the new
+    pose, 'i' at pose 8, then 'done' twice.
     """
 
     poses_file = os.path.abspath(os.path.expanduser(poses_file))
 
+    existing = []
+
     if os.path.isfile(poses_file):
-        rospy.logwarn(
-            "%s exists and will be OVERWRITTEN when you type "
-            "'done'.",
+        try:
+            existing = load_poses(poses_file)
+        except Exception as error:
+            rospy.logwarn(
+                "Could not read the existing %s (%s) - starting "
+                "from scratch.",
+                poses_file,
+                str(error)
+            )
+
+    poses = []
+
+    if existing:
+        rospy.loginfo(
+            "%d existing pose(s) found in %s. Going through them "
+            "one by one - for each: Enter/'k' = KEEP it, "
+            "'r' = REPLACE it with the current joints, "
+            "'i' = INSERT the current joints BEFORE it, "
+            "'x' = DELETE it, 'done' = keep this and all the "
+            "remaining poses and jump to appending.",
+            len(existing),
             poses_file
         )
 
-    rospy.loginfo(
-        "Record mode: put the robot in freedrive (guiding mode). "
-        "Freedrive to each photo pose, check the framing on the "
-        "phone, then press Enter here. 'undo' removes the last "
-        "recorded pose, 'done' saves and exits."
-    )
+        index = 0
+        needs_move = True
 
-    poses = []
+        while index < len(existing):
+
+            if needs_move:
+                move_to_recorded(
+                    move_group,
+                    existing[index],
+                    "existing pose {}".format(index + 1),
+                    execute,
+                    recovery_pub
+                )
+                needs_move = False
+
+            try:
+                answer = input(
+                    ">>> Existing pose %d/%d (will be pose %d): "
+                    "[k]eep / [r]eplace / [i]nsert-before / "
+                    "[x] delete / done: "
+                    % (index + 1, len(existing), len(poses) + 1)
+                ).strip().lower()
+            except EOFError:
+                answer = "done"
+
+            if answer in ("done", "q", "quit"):
+                poses.extend(existing[index:])
+                rospy.loginfo(
+                    "Kept the remaining %d existing pose(s).",
+                    len(existing) - index
+                )
+                break
+
+            if answer in ("", "k", "keep"):
+                poses.append(existing[index])
+                index += 1
+                needs_move = True
+                continue
+
+            if answer in ("x", "del", "delete"):
+                rospy.loginfo(
+                    "Deleted existing pose %d.", index + 1
+                )
+                index += 1
+                needs_move = True
+                continue
+
+            if answer in ("r", "replace", "i", "insert"):
+                joints = current_joints(move_group)
+
+                if joints is None:
+                    continue
+
+                poses.append(joints)
+
+                rospy.loginfo(
+                    "%s pose %d with the current joints: %s",
+                    "Replaced" if answer.startswith("r")
+                    else "Inserted as",
+                    len(poses),
+                    ["{:.4f}".format(v) for v in joints]
+                )
+
+                if answer.startswith("r"):
+                    index += 1
+                # insert: stay at the same existing pose, it is
+                # asked about again right after the inserted one
+                # (the arm drives back to it first).
+                needs_move = True
+                continue
+
+            rospy.loginfo("Unknown command: %s", answer)
+    else:
+        rospy.loginfo(
+            "Record mode: put the robot in freedrive (guiding "
+            "mode). Freedrive to each photo pose, check the "
+            "framing on the phone, then press Enter here."
+        )
+
+    rospy.loginfo(
+        "Appending: Enter = record the current joints as the next "
+        "pose, 'undo' removes the last pose, 'done' saves and "
+        "exits."
+    )
 
     while True:
         try:
@@ -153,16 +351,12 @@ def record_mode(move_group, poses_file):
                 rospy.loginfo("Nothing to undo.")
             continue
 
-        joints = move_group.get_current_joint_values()
+        joints = current_joints(move_group)
 
-        if len(joints) != 7:
-            rospy.logerr(
-                "Read %d joint values instead of 7 - not recorded.",
-                len(joints)
-            )
+        if joints is None:
             continue
 
-        poses.append(list(joints))
+        poses.append(joints)
 
         rospy.loginfo(
             "Recorded pose %d: %s",
@@ -262,6 +456,9 @@ def diagnose_target_state(robot, joints, label):
     so a refused pose reports WHAT it collides with instead of
     just failing. Also distinguishes the other failure mode: a
     valid pose that the planner merely could not find a path to.
+
+    Returns True when the target is valid (pathfinding failure),
+    False when it is in collision, None when the check failed.
     """
 
     try:
@@ -293,17 +490,16 @@ def diagnose_target_state(robot, joints, label):
             label,
             str(error)
         )
-        return
+        return None
 
     if response.valid:
         rospy.logwarn(
-            "%s itself is VALID (no collision at the target). The "
-            "failure was pathfinding (e.g. TIMED_OUT) - try again "
-            "(the planner is randomized), or record an "
-            "intermediate pose before it.",
+            "%s itself is VALID (no collision at the target) - "
+            "the failure was pathfinding (e.g. TIMED_OUT), not an "
+            "obstacle.",
             label
         )
-        return
+        return True
 
     pairs = sorted({
         "{} <-> {}".format(
@@ -321,6 +517,8 @@ def diagnose_target_state(robot, joints, label):
         label,
         "; ".join(pairs) if pairs else "no contact pair reported"
     )
+
+    return False
 
 
 def return_along_poses(move_group, reached_poses, init_joints):
@@ -397,7 +595,67 @@ def main():
         return 1
 
     if mode == MODE_RECORD:
-        result = record_mode(move_group, poses_file)
+        # With _execute:=true the arm DRIVES to each existing pose
+        # during the walkthrough; without it the walkthrough is
+        # motionless (old behavior, safe default).
+        record_execute = rospy.get_param("~execute", False)
+
+        if record_execute:
+            move_group.set_max_velocity_scaling_factor(
+                arc.VELOCITY_SCALE
+            )
+            move_group.set_max_acceleration_scaling_factor(
+                arc.ACCELERATION_SCALE
+            )
+            move_group.set_goal_joint_tolerance(
+                arc.JOINT_TOLERANCE
+            )
+            move_group.set_planning_time(arc.PLANNING_TIME)
+            move_group.set_num_planning_attempts(
+                arc.PLANNING_ATTEMPTS
+            )
+
+            rospy.sleep(2.0)
+
+            # The moves must respect the real holder geometry.
+            record_holder = rospy.get_param(
+                "~holder_mesh",
+                os.path.join(script_dir, arc.HOLDER_MESH_FILE)
+            )
+
+            if record_holder:
+                try:
+                    arc.attach_phone_holder(
+                        scene,
+                        record_holder,
+                        rospy.get_param("~holder_z_offset",
+                                        arc.HOLDER_Z_OFFSET),
+                        rospy.get_param("~holder_yaw_deg",
+                                        arc.HOLDER_YAW_DEG)
+                    )
+                except Exception as error:
+                    rospy.logerr(
+                        "Unable to attach the phone holder: %s",
+                        str(error)
+                    )
+                    moveit_commander.roscpp_shutdown()
+                    return 1
+
+            rospy.logwarn(
+                "Record mode WITH motion: the arm will drive to "
+                "each existing pose (no obstacle scene - the "
+                "object position is only known at run time). Keep "
+                "the workspace clear and the emergency stop at "
+                "hand; motions run at %.0f%% speed.",
+                arc.VELOCITY_SCALE * 100.0
+            )
+
+        result = record_mode(
+            move_group,
+            poses_file,
+            record_execute,
+            make_recovery_publisher() if record_execute else None
+        )
         moveit_commander.roscpp_shutdown()
         return result
 
@@ -428,6 +686,18 @@ def main():
 
     # Lens-object distance used when _object_xyz is not given.
     object_distance = rospy.get_param("~object_distance", 0.03)
+
+    # Planning budget per move, and the escalated budget used for
+    # ONE automatic retry when a pose fails although its target
+    # state is collision-free (pure pathfinding failure): the
+    # planner is randomized and anytime, so more time genuinely
+    # helps with narrow passages.
+    planning_time = rospy.get_param(
+        "~planning_time", arc.PLANNING_TIME
+    )
+    retry_planning_time = rospy.get_param(
+        "~retry_planning_time", 60.0
+    )
 
     object_radius = rospy.get_param("~object_radius", 0.02)
     rod_radius = rospy.get_param("~rod_radius",
@@ -548,7 +818,7 @@ def main():
         arc.ACCELERATION_SCALE
     )
     move_group.set_goal_joint_tolerance(arc.JOINT_TOLERANCE)
-    move_group.set_planning_time(arc.PLANNING_TIME)
+    move_group.set_planning_time(planning_time)
     move_group.set_num_planning_attempts(arc.PLANNING_ATTEMPTS)
 
     rospy.sleep(2.0)
@@ -680,18 +950,45 @@ def main():
             aborted = True
             break
 
-        if not arc.move_to_joint_position(
-                move_group,
-                joints,
-                label="pose {}/{}".format(index, total)):
+        moved = arc.move_to_joint_position(
+            move_group,
+            joints,
+            label="pose {}/{}".format(index, total)
+        )
+
+        if not moved:
+            verdict = diagnose_target_state(
+                robot, joints, "pose {}".format(index)
+            )
+
+            if verdict and retry_planning_time > planning_time:
+                # Target is valid - give the randomized planner a
+                # much bigger budget once before giving up.
+                rospy.logwarn(
+                    "Retrying pose %d with a %.0f s planning "
+                    "budget (was %.0f s)...",
+                    index,
+                    retry_planning_time,
+                    planning_time
+                )
+
+                move_group.set_planning_time(retry_planning_time)
+
+                moved = arc.move_to_joint_position(
+                    move_group,
+                    joints,
+                    label="pose {}/{} (long retry)".format(
+                        index, total
+                    )
+                )
+
+                move_group.set_planning_time(planning_time)
+
+        if not moved:
             rospy.logerr(
                 "Stopped at pose %d/%d. Poses reached so far are "
                 "logged in %s",
                 index, total, output_file
-            )
-
-            diagnose_target_state(
-                robot, joints, "pose {}".format(index)
             )
 
             aborted = True
