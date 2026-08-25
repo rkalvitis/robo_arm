@@ -27,8 +27,8 @@ The script:
 6. rotates the whole pose rigidly at each waypoint so the camera
    keeps aiming at the object; the image ROLL about the camera
    axis is free (_free_roll, default true): at every waypoint the
-   script tries roll angles - nearest the previous waypoint's roll
-   first - and moves to the first pose the arm can actually reach.
+   script tries roll angles - smallest magnitude first - and moves
+   to the first pose the arm can actually reach.
    Any roll keeps the lens position, the lens-object distance and
    the aim unchanged, so the object stays centered in frame; the
    CSV records the pose actually reached, which is what matters
@@ -108,8 +108,8 @@ ARC_DIRECTION = -1.0
 
 # Image roll about the camera axis (only with _track_object:=true).
 # True = at every waypoint try rolls in ROLL_STEP_DEG increments up
-# to +/-ROLL_MAX_DEG, ordered by closeness to the roll used at the
-# previous waypoint, and take the first reachable pose. The roll
+# to +/-ROLL_MAX_DEG, smallest magnitude first, and take the first
+# reachable pose. The roll
 # never moves the lens or the aim - the object stays centered in
 # frame - it only rotates the image, and the true orientation is in
 # the CSV. False = the original fixed zero-roll behavior.
@@ -432,12 +432,14 @@ def make_flange_pose(lens_target, camera_axis, q_aim, roll, lens_xyz):
     return pose
 
 
-def roll_candidates(step_deg, max_deg, previous_roll):
+def roll_candidates(step_deg, max_deg):
     """
-    Roll angles (radians) to try at a waypoint: every step_deg
-    within +/-max_deg, ordered by angular closeness to the roll
-    used at the previous waypoint, so the image orientation drifts
-    as little as possible between consecutive photos.
+    Roll angles (radians) to try at a waypoint: zero first, then
+    every step_deg within +/-max_deg, smallest magnitude first.
+    Zero roll IS the plain tracking-arc pose; preferring the
+    smallest workable roll keeps the photos' orientation as
+    consistent as possible and amplifies a physical
+    object-placement error as little as possible.
     """
 
     step = math.radians(step_deg)
@@ -453,11 +455,7 @@ def roll_candidates(step_deg, max_deg, previous_roll):
             rolls.append(-k * step)
         k += 1
 
-    def circular_distance(roll):
-        delta = abs(roll - previous_roll) % (2.0 * math.pi)
-        return min(delta, 2.0 * math.pi - delta)
-
-    return sorted(rolls, key=circular_distance)
+    return rolls
 
 
 def create_arc_waypoints(
@@ -1687,9 +1685,8 @@ def main():
     )
 
     # With _track_object:=true the image roll about the camera axis
-    # is free by default: each waypoint tries the rolls nearest the
-    # previous waypoint's roll first and moves to the first pose
-    # the arm can reach. The roll never moves the lens or the aim
+    # is free by default: each waypoint tries the rolls smallest
+    # first and moves to the first pose the arm can reach. The roll never moves the lens or the aim
     # (the object stays centered in frame) and the CSV records the
     # orientation actually reached, which is what reconstruction
     # needs. _free_roll:=false restores the fixed zero-roll poses.
@@ -2316,11 +2313,18 @@ def main():
     wait_for_enter(
         "Robot at the initial pose, %d waypoints ready. Place the "
         "object at the logged sphere-center position (%.1f cm "
-        "below the lens), clear the workspace, then confirm to "
-        "start the arc." % (total_points, radius * 100.0)
+        "below the lens), then CHECK THE PHONE at 0.5x and adjust "
+        "the OBJECT (not the phone) until it is centered in the "
+        "ultra-wide view at %.1f cm from the lens ring. The arc "
+        "rotates around the point %.1f cm in front of the MODELED "
+        "lens - if the run drifts off the object as the angle "
+        "grows, the lens constants do not match the physical "
+        "phone: run calibrate_lens.py and use its _lens_xyz/"
+        "_lens_axis. Clear the workspace, then confirm to start "
+        "the arc." % (
+            total_points, radius * 100.0, radius * 100.0,
+            radius * 100.0)
     )
-
-    last_roll = 0.0
 
     for index, spec in enumerate(waypoints, start=1):
 
@@ -2338,8 +2342,7 @@ def main():
 
         if track_object and free_roll:
             # Same lens position and aim for every candidate; only
-            # the image roll differs, nearest the previous
-            # waypoint's roll first.
+            # the image roll differs, smallest roll first.
             candidates = [
                 (
                     roll,
@@ -2353,8 +2356,7 @@ def main():
                 )
                 for roll in roll_candidates(
                     roll_step_deg,
-                    roll_max_deg,
-                    last_roll
+                    roll_max_deg
                 )
             ]
         else:
@@ -2398,8 +2400,6 @@ def main():
 
             moveit_commander.roscpp_shutdown()
             return 1
-
-        last_roll = reached_roll
 
         recorded_stops.append((
             list(move_group.get_current_joint_values()),

@@ -79,10 +79,10 @@ All are private ROS params (`_name:=value`):
 | `_arc_direction` | `-1.0` | Side of the world Y axis the arc descends toward: `-1` = sweep toward **−Y** (default since 2026-07-20 — the phone/lens side of the flange, unchanged with `phone_mount_conf3.stl`), `+1` = toward +Y (the original direction). The camera-aim rotation flips together with it; any value is normalized to its sign |
 | `_number_of_points` | `9` | Number of waypoints (photo poses) along the arc |
 | `_wait_between_points` | `2.0` (s) | Pause at each waypoint (used only with `_confirm_each_pose:=false`) |
-| `_confirm_each_pose` | `false` | `true` = the script stops at **every waypoint** and waits for **Enter** before moving to the next pose (photo workflow); `false` = automatic `_wait_between_points`-second pauses. Independent of this flag, the script **always waits for Enter at the initial pose** — that's the moment to place the object at the logged sphere-center position before the arc starts |
+| `_confirm_each_pose` | `false` | `true` = the script stops at **every waypoint** and waits for **Enter** before moving to the next pose (photo workflow); `false` = automatic `_wait_between_points`-second pauses. Independent of this flag, the script **always waits for Enter at the initial pose** — that's the moment to place the object at the logged sphere-center position AND **verify on the phone at 0.5× that the object is centered in the ultra-wide view at `_radius` from the lens ring**. Note: the arc rotates around the point `_radius` in front of the **modeled** lens — a perfectly placed start does NOT protect the run if the lens constants are wrong (the rotation center is then offset from the real object and the distance drifts with angle: observed 2026-08-25, 3 cm → 6 cm by stop 4). If that happens, calibrate with `calibrate_lens.py` |
 | `_return_to_start` | `true` | After the **last waypoint** (and the final photo pause: Enter with `_confirm_each_pose:=true`, a `_wait_between_points` pause otherwise) the robot returns to the initial configuration by **retracing the executed stops in reverse** — the exact corridor just driven forward, keeping the photo pass's clearances to the object, rod, and screen. Also runs when the arc **aborts at an unfeasible waypoint**: the stops reached so far are retraced back to the start. (A free joint-space plan is not used: the keep-out sphere is ACM-exempt for the hand, so such a plan may legally sweep the phone through the object region — observed in sim 2026-08-25.) Per reverse segment: straight Cartesian line, falling back to a joint-space move to that stop's recorded joints. `false` = stay where the run ended |
 | `_track_object` | `true` | `true` = the hand rotates along the arc so the camera **always faces the object**; the flange orbits at `radius + camera_offset` so the lens keeps `radius`. `false` = orientation frozen relative to the world (tested 2026-07-16: far waypoints become physically unreachable, object leaves the frame) |
-| `_free_roll` | `true` | Only with `_track_object:=true`. `true` = the **image roll about the camera axis is free**: at every waypoint the script tries roll angles (nearest the previous waypoint's roll first, in `_roll_step_deg` steps up to ±`_roll_max_deg`) and moves to the first pose the arm can reach. The roll never moves the lens or the aim — the object stays centered in frame — and the CSV records the orientation actually reached, which is all reconstruction (3DGS/COLMAP) needs. `false` = the original fixed zero-roll poses (photo rotation stays consistent) |
+| `_free_roll` | `true` | Only with `_track_object:=true`. `true` = the **image roll about the camera axis is free**: at every waypoint the script tries roll angles (**smallest roll first**, in `_roll_step_deg` steps up to ±`_roll_max_deg`) and moves to the first pose the arm can reach, so nonzero rolls appear only where strictly needed. The roll never moves the lens or the aim — the object stays centered in frame — and the CSV records the orientation actually reached, which is all reconstruction (3DGS/COLMAP) needs. `false` = the original fixed zero-roll poses (photo rotation stays consistent) |
 | `_roll_step_deg` | `15.0` | Roll increment between candidates tried at each waypoint (with `_free_roll:=true`) |
 | `_roll_max_deg` | `180.0` | Maximum roll magnitude tried, ± around zero; `180` = full freedom (with `_free_roll:=true`) |
 | `_object_radius` | `0.5 × _radius` (m) | Radius of the keep-out collision sphere around the object. **A value in meters** (the 0.5 is a ratio, only used for the default). `0` disables it; must be smaller than `_radius` |
@@ -93,13 +93,72 @@ All are private ROS params (`_name:=value`):
 | `_screen_height` | `0.425` (m) | Height of the screen's **bottom** above the ground (with the defaults the screen spans 42.5–61.9 cm, so the 58 cm insect sits inside it; the rim ends up above the starting lens height — the phone works inside the enclosure on upper waypoints, and MoveIt vetoes any pose where the holder would touch the wall) |
 | `_screen_yaw_deg` | `auto` | Screen rotation about the world Z axis. `auto` = derived from `_arc_direction` so the **opening faces the camera side**: yaw `0` (wall bulges toward +Y, behind the insect) with the default −Y arc, `180` with `_arc_direction:=1`. A number forces that yaw |
 | `_screen_scale` | `1.0` | Vertex scale for the screen STL (this one is modeled in meters, unlike the mm phone-mount STLs) |
-| `_lens_xyz` | ultra-wide lens of the iPhone 15 Pro, measured from `phone_mount_conf3.stl`: `-0.0225,-0.0239,0.1170` (m) | Phone-lens position in the **flange frame** (`panda_link8`). The object is placed `radius` from the **lens along the camera axis**, and the arc keeps the lens (not the flange) at `radius`. `_lens_xyz:=''` falls back to the legacy scalar `_camera_offset` behavior |
+| `_lens_xyz` | ultra-wide lens of the iPhone 15 Pro, measured from `phone_mount_conf3.stl`: `-0.0225,-0.0239,0.1170` (m) | Phone-lens position in the **flange frame** (`panda_link8`). The object is placed `radius` from the **lens along the camera axis**, and the arc keeps the lens (not the flange) at `radius`. `_lens_xyz:=''` falls back to the legacy scalar `_camera_offset` behavior. **If the arc drifts off the object as the angle grows, these constants are wrong for the physical phone — run `calibrate_lens.py` (below) and use its output** |
 | `_lens_axis` | `-0.70711,0.0,0.70711` | Direction the camera looks, unit vector in the flange frame (the phone sits at 45° in the cradle). With the default, the **start pose must pitch the flange 45°** so the camera looks straight down — the script warns if the camera axis is >5° off vertical |
 | `_camera_offset` | `0.10` (m) | **Legacy**, only used with `_lens_xyz:=''`: lens assumed on the flange z axis, `camera_offset` below it |
 | `_holder_mesh` | `phone_mount_conf3.stl` next to the script | STL (binary, in mm) of the phone holder **with the phone**, attached rigidly to `panda_link8` as collision geometry. **Copy the STL to the robot PC next to the script** (`src/panda_moveit_ctrl/scripts/`), or the script exits with an error. `''` disables the attachment |
 | `_holder_z_offset` | `-0.008` (m) | Mesh z shift so its ISO 9409-1-A50 mounting face (at z = +8 mm in mesh coordinates) sits flush on the flange surface |
 | `_holder_yaw_deg` | `-90.0` | Rotation of the mesh about the flange z axis. Derived from the dowel pin: the mesh's pin hole is on its +Y axis, the flange's pin is on +X of `panda_link8` |
 | `_output_file` | `arc_poses_<date>_<time>.csv` **next to the script** (`src/panda_moveit_ctrl/scripts/`) | CSV file recording, for the start pose and every waypoint reached: the 7 joint values, end-effector position, orientation quaternion, and the world lens position. Written incrementally, so an aborted run keeps everything up to the failure. A relative path given explicitly is resolved against the terminal's current directory |
+
+## Manual poses mode (`panda_manual_poses.py`)
+
+Alternative to the computed arc for maximum consistency: **you pick every photo pose by
+hand once**, and each run replays exactly those joint configurations — same arm posture,
+same camera pose, every iteration. No lens model, no tracking math, no roll decisions.
+
+**Record the poses** (robot in freedrive/guiding mode, `move_group` running; never moves
+the robot):
+
+```bash
+rosrun panda_moveit_ctrl panda_manual_poses.py _mode:=record
+```
+
+Freedrive to each photo pose (check framing on the phone), press **Enter** to record;
+`undo` removes the last pose, `done` writes `manual_poses.csv` (next to the script, one
+row of 7 joint values per pose; `_poses_file` overrides the path).
+
+**Run them:**
+
+```bash
+rosrun panda_moveit_ctrl panda_manual_poses.py _execute:=true \
+  _confirm_each_pose:=true _object_xyz:='0.343,0.121,0.58'
+```
+
+Moves to pose 1 (joint-space plan), always waits for Enter (object placement/check), then
+visits poses 2..N with photo pauses and the same CSV pose logging as the arc script, and
+returns through the poses in reverse at the end — also after an abort, using the poses
+reached so far (`_return_to_start:=false` disables). `_object_xyz` (world frame, e.g. from
+the arc script's "Object (sphere center)" log line) builds the obstacle scene (keep-out
+sphere `_object_radius` 0.02, rod, screen — same params as the arc script) so the moves
+*between* poses are collision-checked; omit it to skip obstacles entirely. Note the planner
+may refuse a demonstrated pose that sits within an obstacle's safety margin — shrink the
+margin (e.g. `_rod_radius:=0.002`) or drop that obstacle. The phone holder is attached as
+collision geometry either way. `panda_semicircle_motion.py` is unchanged and remains
+available.
+
+## Lens calibration (`calibrate_lens.py`)
+
+The `_lens_xyz`/`_lens_axis` defaults were derived from the mount STL and can be wrong for
+the physically mounted phone (wrong ring, phone seated differently). The symptom is precise:
+**the start pose is perfect, but the lens-object distance grows with arc angle** — the arc is
+rigidly rotating about a center offset from the real object (3 cm → 6 cm at stop 4 of a 160°
+arc ≈ 2.3 cm offset). `calibrate_lens.py` solves the true lens position + optical axis in the
+flange frame from demonstrated poses. It **never moves the robot** (read-only).
+
+1. Copy `calibrate_lens.py` to the robot PC next to the motion script; keep `move_group`
+   running (Terminal 1, real robot).
+2. Fix the object on its rod and **do not move it** during the whole calibration.
+3. Put the arm in freedrive (guiding mode) and run
+   `rosrun panda_moveit_ctrl calibrate_lens.py`.
+4. For each sample: freedrive until the object is **centered in the 0.5× ultra-wide view**,
+   measure lens-ring→object with a ruler, hold still, press Enter, type the distance (cm).
+5. Take 4–6 samples from clearly different directions and **at least two clearly different
+   distances** (e.g. 3 cm and 6 cm — with one distance the lens position and axis cannot be
+   separated; the script refuses that case).
+6. Type `done`: it prints the solved `_lens_xyz`/`_lens_axis` (ready-to-paste rosrun
+   overrides and constants), the solved object position, and per-sample residuals (redo if
+   the worst residual is > 5 mm).
 
 Example with custom arc:
 
