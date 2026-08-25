@@ -126,9 +126,11 @@ rosrun panda_moveit_ctrl panda_manual_poses.py _execute:=true _confirm_each_pose
 
 Every run **starts and ends at the initial pose** from `_joint_file` (`joint_start.csv`,
 same file as the arc script): the arm moves there first, the object position is determined
-(`_object_xyz` if given; otherwise computed like the arc script places it —
-`_object_distance`, default 3 cm, in front of the lens along the camera axis at the initial
-pose), the obstacle scene (keep-out sphere `_object_radius` 0.02, rod at its true 1.5 mm,
+(`_object_xyz` if given; otherwise **directly underneath the ultra-wide lens**:
+`_object_distance`, default 3 cm, straight down in the world from the lens position at the
+initial pose — the lens position comes from the phone-mount model; the script warns if the
+camera axis is >5° off vertical, since then the object is below the lens but off-center in
+frame), the obstacle scene (keep-out sphere `_object_radius` 0.02, rod at its true 1.5 mm,
 screen) is built around it, and the script waits for Enter (place/check the object at the
 logged position). It then visits poses 1..N at the exact recorded joints with photo pauses
 and the same CSV logging as the arc script (initial pose = row 0), and **always returns**:

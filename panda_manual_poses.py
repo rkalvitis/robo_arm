@@ -30,9 +30,10 @@ RUN MODE (default) - the arm steps through the recorded poses:
      same file as the arc script) with a joint-space plan - every
      run starts AND ends there;
   3. determines the object position: _object_xyz if given,
-     otherwise computed from the reached initial pose exactly
-     like the arc script places it - _object_distance (default
-     3 cm) in front of the lens along the camera axis. The
+     otherwise DIRECTLY UNDERNEATH the ultra-wide lens at the
+     reached initial pose - _object_distance (default 3 cm)
+     straight down in the world from the lens position, which
+     comes from the phone-mount model (_lens_xyz). The
      obstacle scene (keep-out sphere, support rod, background
      screen) is built around it so the moves between poses are
      collision-checked. The demonstrated poses were physically
@@ -54,6 +55,7 @@ from __future__ import print_function
 
 import copy
 import datetime
+import math
 import os
 import sys
 
@@ -350,9 +352,9 @@ def main():
     )
 
     # World position of the object, 'x,y,z' in the planning frame.
-    # '' (default) = computed from the reached initial pose:
-    # _object_distance in front of the lens along the camera axis,
-    # exactly like the arc script places it.
+    # '' (default) = directly underneath the ultra-wide lens at
+    # the reached initial pose: _object_distance straight down in
+    # the world from the lens position (from the mount model).
     object_xyz_text = rospy.get_param("~object_xyz", "")
 
     # Lens-object distance used when _object_xyz is not given.
@@ -464,8 +466,8 @@ def main():
         "Object position: %s",
         "({:.4f}, {:.4f}, {:.4f})".format(*object_xyz)
         if object_xyz else
-        "computed at the initial pose, %.1f cm in front of the "
-        "lens" % (object_distance * 100.0)
+        "directly underneath the ultra-wide lens at the initial "
+        "pose, %.1f cm straight down" % (object_distance * 100.0)
     )
     rospy.loginfo(
         "The run always starts and ends at the initial pose."
@@ -531,21 +533,45 @@ def main():
     start_pose = copy.deepcopy(move_group.get_current_pose().pose)
 
     if object_xyz is None:
-        # Same placement rule as the arc script: the object sits
-        # _object_distance in front of the lens at the initial
-        # pose.
-        _, _, center_np = arc.compute_camera_geometry(
+        # The object (and the rod under it) sits DIRECTLY
+        # UNDERNEATH the ultra-wide lens: _object_distance
+        # straight down in the world from the lens position at the
+        # initial pose (the lens transform comes from the phone
+        # mount model). This is a vertical drop, NOT along the
+        # camera axis - the two differ when the camera is not
+        # aimed straight down.
+        lens_world, axis_world, _ = arc.compute_camera_geometry(
             start_pose, lens_xyz, lens_axis, object_distance
         )
-        object_xyz = [center_np[0], center_np[1], center_np[2]]
+
+        object_xyz = [
+            lens_world[0],
+            lens_world[1],
+            lens_world[2] - object_distance
+        ]
 
         rospy.loginfo(
-            "Object position derived from the initial pose: "
-            "x=%.6f, y=%.6f, z=%.6f (%.1f cm in front of the "
-            "lens)",
+            "Object position: directly underneath the ultra-wide "
+            "lens at the initial pose - x=%.6f, y=%.6f, z=%.6f "
+            "(%.1f cm straight below the lens at %.6f, %.6f, "
+            "%.6f)",
             object_xyz[0], object_xyz[1], object_xyz[2],
-            object_distance * 100.0
+            object_distance * 100.0,
+            lens_world[0], lens_world[1], lens_world[2]
         )
+
+        tilt_deg = math.degrees(
+            math.acos(max(-1.0, min(1.0, -axis_world[2])))
+        )
+
+        if tilt_deg > 5.0:
+            rospy.logwarn(
+                "The camera axis is %.1f degrees away from "
+                "straight down at the initial pose: the object "
+                "sits below the lens but will be off-center in "
+                "the frame by about that angle.",
+                tilt_deg
+            )
 
     if not build_obstacles(
             scene, move_group, robot, object_xyz,
