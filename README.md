@@ -124,7 +124,7 @@ hand; after each freedrive the script clears the Franka monitored stop automatic
 Enter/`k` keeps a pose (the arm then drives to the next), `r` replaces it with the current
 joints, `i` inserts the current joints *before* it (the arm then drives back to the
 existing pose), `x` deletes it, `done` keeps all the remaining ones — then appends new
-poses at the end. Without `_execute:=true` the walkthrough is motionless. So inserting a helper pose between 7 and 8: keep 1–7
+poses at the end. Without `_execute:=true` the walkthrough is motionless. After `done` saves the file (with `_execute:=true`), the arm **drives back to the base pose** from `joint_start.csv`, ready for a run. So inserting a helper pose between 7 and 8: keep 1–7
 (Enter ×7), freedrive to the new pose, `i` at pose 8, then `done` twice.
 
 **Run them:**

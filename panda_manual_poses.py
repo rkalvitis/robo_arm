@@ -92,6 +92,27 @@ MODE_RUN = "run"
 POSES_FILE = "manual_poses.csv"
 
 
+def get_param_once(name, default):
+    """
+    Reads a private ROS parameter and then DELETES it from the
+    parameter server. Command-line _name:=value settings persist
+    on the server after the node exits (classic gotcha: one
+    _mode:=record invocation makes every later run without the
+    argument record too - and a stale _execute:=true is worse).
+    Deleting after reading makes every flag apply to exactly the
+    run it was typed for.
+    """
+
+    value = rospy.get_param(name, default)
+
+    try:
+        rospy.delete_param(name)
+    except Exception:
+        pass
+
+    return value
+
+
 def load_poses(file_path):
     """
     Reads the poses CSV: one row per pose, 7 joint values each.
@@ -563,9 +584,9 @@ def main():
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    mode = rospy.get_param("~mode", MODE_RUN).strip().lower()
+    mode = get_param_once("~mode", MODE_RUN).strip().lower()
 
-    poses_file = rospy.get_param(
+    poses_file = get_param_once(
         "~poses_file",
         os.path.join(script_dir, POSES_FILE)
     )
@@ -598,7 +619,7 @@ def main():
         # With _execute:=true the arm DRIVES to each existing pose
         # during the walkthrough; without it the walkthrough is
         # motionless (old behavior, safe default).
-        record_execute = rospy.get_param("~execute", False)
+        record_execute = get_param_once("~execute", False)
 
         if record_execute:
             move_group.set_max_velocity_scaling_factor(
@@ -618,7 +639,7 @@ def main():
             rospy.sleep(2.0)
 
             # The moves must respect the real holder geometry.
-            record_holder = rospy.get_param(
+            record_holder = get_param_once(
                 "~holder_mesh",
                 os.path.join(script_dir, arc.HOLDER_MESH_FILE)
             )
@@ -628,9 +649,9 @@ def main():
                     arc.attach_phone_holder(
                         scene,
                         record_holder,
-                        rospy.get_param("~holder_z_offset",
+                        get_param_once("~holder_z_offset",
                                         arc.HOLDER_Z_OFFSET),
-                        rospy.get_param("~holder_yaw_deg",
+                        get_param_once("~holder_yaw_deg",
                                         arc.HOLDER_YAW_DEG)
                     )
                 except Exception as error:
@@ -650,30 +671,73 @@ def main():
                 arc.VELOCITY_SCALE * 100.0
             )
 
+        recovery_pub = (
+            make_recovery_publisher() if record_execute else None
+        )
+
         result = record_mode(
             move_group,
             poses_file,
             record_execute,
-            make_recovery_publisher() if record_execute else None
+            recovery_pub
         )
+
+        # After the poses are saved, drive back to the base pose
+        # (joint_start.csv) so a run can start right away.
+        if (result == 0 and record_execute
+                and not rospy.is_shutdown()):
+
+            record_joint_file = get_param_once(
+                "~joint_file",
+                os.path.join(script_dir, "joint_start.csv")
+            )
+
+            try:
+                base_joints = arc.load_joint_position(
+                    record_joint_file
+                )
+            except Exception as error:
+                base_joints = None
+                rospy.logwarn(
+                    "Poses saved, but cannot read %s to return to "
+                    "the base pose: %s",
+                    record_joint_file,
+                    str(error)
+                )
+
+            if base_joints is not None:
+                rospy.loginfo("Returning to the base pose...")
+
+                attempt_error_recovery(recovery_pub)
+
+                if not arc.move_to_joint_position(
+                        move_group,
+                        base_joints,
+                        label="the base pose (joint_start.csv)"):
+                    rospy.logwarn(
+                        "Could not move to the base pose - the "
+                        "arm stays where it is (the poses file is "
+                        "saved either way)."
+                    )
+
         moveit_commander.roscpp_shutdown()
         return result
 
     # ------------------------- run mode -------------------------
 
-    execute_motion = rospy.get_param("~execute", False)
+    execute_motion = get_param_once("~execute", False)
 
-    wait_between_points = rospy.get_param(
+    wait_between_points = get_param_once(
         "~wait_between_points", arc.WAIT_BETWEEN_POINTS
     )
 
-    confirm_each_pose = rospy.get_param(
+    confirm_each_pose = get_param_once(
         "~confirm_each_pose", arc.CONFIRM_EACH_POSE
     )
 
     # Initial pose: every run starts AND ends here (same file the
     # arc script uses).
-    joint_file = rospy.get_param(
+    joint_file = get_param_once(
         "~joint_file",
         os.path.join(script_dir, "joint_start.csv")
     )
@@ -682,63 +746,63 @@ def main():
     # '' (default) = directly underneath the ultra-wide lens at
     # the reached initial pose: _object_distance straight down in
     # the world from the lens position (from the mount model).
-    object_xyz_text = rospy.get_param("~object_xyz", "")
+    object_xyz_text = get_param_once("~object_xyz", "")
 
     # Lens-object distance used when _object_xyz is not given.
-    object_distance = rospy.get_param("~object_distance", 0.03)
+    object_distance = get_param_once("~object_distance", 0.03)
 
     # Planning budget per move, and the escalated budget used for
     # ONE automatic retry when a pose fails although its target
     # state is collision-free (pure pathfinding failure): the
     # planner is randomized and anytime, so more time genuinely
     # helps with narrow passages.
-    planning_time = rospy.get_param(
+    planning_time = get_param_once(
         "~planning_time", arc.PLANNING_TIME
     )
-    retry_planning_time = rospy.get_param(
+    retry_planning_time = get_param_once(
         "~retry_planning_time", 60.0
     )
 
-    object_radius = rospy.get_param("~object_radius", 0.02)
-    rod_radius = rospy.get_param("~rod_radius",
+    object_radius = get_param_once("~object_radius", 0.02)
+    rod_radius = get_param_once("~rod_radius",
                                  arc.SUPPORT_ROD_RADIUS)
-    object_height = rospy.get_param("~object_height", 0.58)
+    object_height = get_param_once("~object_height", 0.58)
 
-    screen_mesh = rospy.get_param(
+    screen_mesh = get_param_once(
         "~screen_mesh",
         os.path.join(script_dir, arc.SCREEN_MESH_FILE)
     )
-    screen_scale = rospy.get_param("~screen_scale",
+    screen_scale = get_param_once("~screen_scale",
                                    arc.SCREEN_MESH_SCALE)
-    screen_height = rospy.get_param("~screen_height",
+    screen_height = get_param_once("~screen_height",
                                     arc.SCREEN_HEIGHT_ABOVE_GROUND)
     # No computed arc here, so no direction to derive "auto" from:
     # 0 = wall behind the object toward +Y (the current setup).
-    screen_yaw_deg = float(rospy.get_param("~screen_yaw_deg", 0.0))
+    screen_yaw_deg = float(get_param_once("~screen_yaw_deg", 0.0))
 
     keepout_ignored_links = [
         link.strip()
-        for link in rospy.get_param(
+        for link in get_param_once(
             "~keepout_ignored_links",
             arc.KEEPOUT_IGNORED_LINKS
         ).split(",")
         if link.strip()
     ]
 
-    holder_mesh = rospy.get_param(
+    holder_mesh = get_param_once(
         "~holder_mesh",
         os.path.join(script_dir, arc.HOLDER_MESH_FILE)
     )
-    holder_z_offset = rospy.get_param("~holder_z_offset",
+    holder_z_offset = get_param_once("~holder_z_offset",
                                       arc.HOLDER_Z_OFFSET)
-    holder_yaw_deg = rospy.get_param("~holder_yaw_deg",
+    holder_yaw_deg = get_param_once("~holder_yaw_deg",
                                      arc.HOLDER_YAW_DEG)
 
     # Lens transform: used for the lens_x/y/z CSV columns and for
     # deriving the default object position from the initial pose.
-    lens_xyz_text = rospy.get_param("~lens_xyz",
+    lens_xyz_text = get_param_once("~lens_xyz",
                                     arc.LENS_XYZ_LINK8)
-    lens_axis_text = rospy.get_param("~lens_axis",
+    lens_axis_text = get_param_once("~lens_axis",
                                      arc.LENS_AXIS_LINK8)
     try:
         lens_xyz = np.array(
@@ -772,7 +836,7 @@ def main():
             moveit_commander.roscpp_shutdown()
             return 1
 
-    output_file = rospy.get_param("~output_file", "")
+    output_file = get_param_once("~output_file", "")
 
     if not output_file:
         output_file = os.path.join(
