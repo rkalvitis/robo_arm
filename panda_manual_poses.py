@@ -92,25 +92,55 @@ MODE_RUN = "run"
 POSES_FILE = "manual_poses.csv"
 
 
-def get_param_once(name, default):
+def _parse_cli_value(text):
     """
-    Reads a private ROS parameter and then DELETES it from the
-    parameter server. Command-line _name:=value settings persist
-    on the server after the node exits (classic gotcha: one
-    _mode:=record invocation makes every later run without the
-    argument record too - and a stale _execute:=true is worse).
-    Deleting after reading makes every flag apply to exactly the
-    run it was typed for.
+    Interprets a _name:=value command-line value: booleans,
+    numbers, empty string (also the quoted '' form), else the
+    literal string.
     """
 
-    value = rospy.get_param(name, default)
+    if text in ("", "''", '""'):
+        return ""
+
+    lowered = text.lower()
+
+    if lowered == "true":
+        return True
+
+    if lowered == "false":
+        return False
 
     try:
-        rospy.delete_param(name)
-    except Exception:
+        return int(text)
+    except ValueError:
         pass
 
-    return value
+    try:
+        return float(text)
+    except ValueError:
+        pass
+
+    return text
+
+
+def get_param_once(name, default):
+    """
+    Reads a parameter from THE COMMAND LINE ONLY (_name:=value in
+    sys.argv), never from the ROS parameter server. Server values
+    persist after a node exits, so a single _mode:=record run
+    used to make every later run without the argument record too
+    (and a stale _execute:=true is worse). With this, a flag
+    exists exactly when it is typed - stale server state cannot
+    change behavior.
+    """
+
+    key = "_{}:=".format(name.lstrip("~_"))
+
+    for argument in sys.argv[1:]:
+        if argument.startswith(key):
+            return _parse_cli_value(argument[len(key):])
+
+    return default
 
 
 def load_poses(file_path):
