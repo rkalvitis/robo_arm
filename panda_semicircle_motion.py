@@ -205,16 +205,16 @@ CAMERA_OFFSET_METERS = 0.10
 # panda_link8 (flange) frame, measured from phone_mount_conf3.stl
 # (the phone sits at 45 degrees in the cradle, flipped 180 degrees
 # vs the original Mount+phone.stl, camera bump near the cradle
-# center; conf3 = conf2 slid 10.3 mm toward link8 -Y). Values
-# obtained by rigid-transforming the fitted lens-ring circles of
-# the previous mesh (phone part matches to <1e-5 mm) and verified
-# by a fresh circle fit on this mesh (0.3 mm agreement). On the
-# iPhone 15 Pro the ultra-wide is the BOTTOM-LEFT lens of the bump
-# (back view, portrait); main is at link8 (-0.0225, -0.0431,
-# 0.1170), telephoto at (-0.0359, -0.0336, 0.1036). Verify which
-# ring is the ultra-wide by covering the lenses one at a time with
-# the Camera app at 0.5x.
-LENS_XYZ_LINK8 = "-0.0225,-0.0239,0.1170"
+# center; conf3 = conf2 slid 10.3 mm toward link8 -Y). Ring
+# positions are mesh-measured (fresh circle fit, 0.3 mm
+# agreement); the ULTRA-WIDE is the TOP-LEFT ring of the bump -
+# physically verified by the user 2026-08-25 (cover the lenses one
+# at a time with the Camera app at 0.5x). The other left-column
+# ring at (-0.0225, -0.0239, 0.1170) was WRONGLY used as the
+# ultra-wide until 2026-08-25 - the two are 19.2 mm apart, which
+# produced the arc drift (rotation center ~2 cm off the object).
+# Third ring (telephoto side): (-0.0359, -0.0336, 0.1036).
+LENS_XYZ_LINK8 = "-0.0225,-0.0431,0.1170"
 
 # Direction the camera looks, unit vector in the panda_link8 frame
 # (normal of the phone back): 45 degrees between the flange z axis
