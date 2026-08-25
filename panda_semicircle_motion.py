@@ -44,7 +44,13 @@ The script:
     _screen_yaw_deg overrides it). NO link may touch it;
 8. between waypoints: waits _wait_between_points seconds, or, with
    _confirm_each_pose:=true, waits for Enter at every stop instead
-   (take the photo, press Enter, the arm moves on).
+   (take the photo, press Enter, the arm moves on);
+9. after the last waypoint (final photo: Enter with
+   _confirm_each_pose:=true, _wait_between_points pause
+   otherwise), plans a joint-space move back to the initial
+   configuration with all obstacles (sphere, rod, screen) still in
+   the planning scene - _return_to_start:=false leaves the arm at
+   the last waypoint instead. Skipped if the arc was aborted.
 
 Example joint_start.csv:
 
@@ -116,6 +122,13 @@ WAIT_AFTER_INITIAL_POSITION = 2.0
 # the arc starts.
 CONFIRM_EACH_POSE = False
 
+# After the last waypoint the robot plans a collision-aware
+# joint-space move back to the initial configuration (the
+# obstacles stay in the planning scene). Only runs when the whole
+# arc completed; a run aborted at a waypoint leaves the arm where
+# it stopped.
+RETURN_TO_START = True
+
 VELOCITY_SCALE = 0.05
 ACCELERATION_SCALE = 0.05
 
@@ -144,8 +157,9 @@ OBJECT_RADIUS_RATIO = 0.5
 
 KEEPOUT_OBJECT_NAME = "object_keepout"
 
-# The object sits on a thin vertical rod (2 mm radius) reaching up
-# from the ground. Modeled with a safety margin; 0 disables it.
+# The object sits on a thin vertical rod (3 mm diameter = 1.5 mm
+# radius) reaching up from the ground. Modeled with a safety
+# margin; 0 disables it.
 ROD_OBJECT_NAME = "support_rod"
 SUPPORT_ROD_RADIUS = 0.005
 
@@ -1528,6 +1542,14 @@ def main():
         CONFIRM_EACH_POSE
     )
 
+    # true = after the last waypoint (and the final photo pause)
+    # the robot returns to the initial joint configuration with a
+    # collision-aware plan; false = it stays at the last waypoint.
+    return_to_start = rospy.get_param(
+        "~return_to_start",
+        RETURN_TO_START
+    )
+
     radius = rospy.get_param(
         "~radius",
         RADIUS_METERS
@@ -1804,6 +1826,10 @@ def main():
             "Wait between waypoints: %.2f seconds",
             wait_between_points
         )
+    rospy.loginfo(
+        "Return to the initial pose after the arc: %s",
+        return_to_start
+    )
 
     if arc_degrees > 90.0:
         rospy.logwarn(
@@ -2287,6 +2313,38 @@ def main():
         "Joint values and poses saved to: %s",
         os.path.abspath(os.path.expanduser(output_file))
     )
+
+    if return_to_start and not rospy.is_shutdown():
+
+        # Final photo moment: the arm is still at the last
+        # waypoint here.
+        if confirm_each_pose:
+            wait_for_enter(
+                "Last waypoint done - take the final photo, then "
+                "confirm to return to the initial pose."
+            )
+        else:
+            rospy.loginfo(
+                "Waiting %.2f seconds before returning to the "
+                "initial pose...",
+                wait_between_points
+            )
+
+            rospy.sleep(wait_between_points)
+
+        rospy.loginfo(
+            "Returning to the initial pose (the obstacles stay in "
+            "the planning scene, so the plan avoids them)..."
+        )
+
+        if not move_to_joint_position(
+                move_group,
+                initial_joint_position):
+            rospy.logerr(
+                "Unable to plan a collision-free return to the "
+                "initial pose - the arm stays at the last "
+                "waypoint."
+            )
 
     move_group.stop()
     move_group.clear_pose_targets()
