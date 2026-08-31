@@ -915,6 +915,20 @@ def main():
     move_group.set_planning_time(planning_time)
     move_group.set_num_planning_attempts(arc.PLANNING_ATTEMPTS)
 
+    # Photo-moment flags for the long-running joint recorder
+    # (record_joint_states.py in its own terminal): every marker is
+    # published on /pose_events and lands, timestamped, in the
+    # recorder's events table. Harmless no-op when no recorder runs.
+    from std_msgs.msg import String as _EventMsg
+
+    event_pub = rospy.Publisher(
+        "/pose_events", _EventMsg, queue_size=20)
+
+    def mark_event(event, pose=None):
+        event_pub.publish(_EventMsg(
+            data=event if pose is None
+            else "%s,%d" % (event, pose)))
+
     rospy.sleep(2.0)
 
     if holder_mesh:
@@ -965,6 +979,8 @@ def main():
     rospy.sleep(arc.WAIT_AFTER_INITIAL_POSITION)
 
     arc.print_current_pose(move_group, "Initial pose reached")
+
+    mark_event("init_reached", 0)
 
     start_pose = copy.deepcopy(move_group.get_current_pose().pose)
 
@@ -1037,6 +1053,8 @@ def main():
         "to start." % total
     )
 
+    mark_event("init_confirmed", 0)
+
     reached_poses = []
     aborted = False
 
@@ -1102,6 +1120,9 @@ def main():
             lens_xyz
         )
 
+        # photo window opens: arm settled at the pose
+        mark_event("pose_reached", index)
+
         if index < total:
             if confirm_each_pose:
                 arc.wait_for_enter(
@@ -1114,6 +1135,9 @@ def main():
                     wait_between_points
                 )
                 rospy.sleep(wait_between_points)
+
+            # photo window closes: about to leave the pose
+            mark_event("pose_left", index)
 
     log_handle.close()
 
@@ -1135,6 +1159,11 @@ def main():
             else:
                 rospy.sleep(wait_between_points)
 
+            # photo window of the last pose closes
+            mark_event("pose_left", total)
+
+        mark_event("return_start")
+
         rospy.loginfo(
             "Returning to the initial pose through the reached "
             "poses in reverse..."
@@ -1145,6 +1174,8 @@ def main():
             rospy.loginfo("Back at the initial pose.")
         else:
             rospy.logerr("Return incomplete.")
+
+        mark_event("run_end")
 
     move_group.stop()
     move_group.clear_pose_targets()

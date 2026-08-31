@@ -147,6 +147,33 @@ after the last pose — or after an abort, over the poses reached so far — the
 the poses in reverse and finishes at the initial pose. When a pose fails, the script collision-checks the *target* configuration and prints the exact colliding body pair; if the target is valid (pure pathfinding failure), it automatically retries that move once with a bigger planning budget (`_planning_time`, default 10 s per move; `_retry_planning_time`, default 60 s for the retry — the planner is randomized and anytime, so more time genuinely helps narrow passages). If even the long retry fails, record an intermediate pose. A pose refused for *collision* instead means an obstacle margin — shrink it or drop that obstacle. The phone holder is attached as collision geometry either way.
 `panda_semicircle_motion.py` is unchanged and remains available.
 
+## Joint-state recording for mocap registration (`record_joint_states.py`)
+
+Run on the robot PC in its own terminal for the whole capture session, alongside the
+mocap recording (`pixi run record-poses` in the optitrack repo) and the pose replay:
+
+```bash
+rosrun panda_moveit_ctrl record_joint_states.py     # Ctrl-C to stop
+```
+
+Writes `joint_states_<ts>.db` — an sqlite database (table `joint_states`: stamp,
+joint1..joint7; header-stamped ~1 kHz, committed every second; `_output_file:=path`
+overrides; stamps are Unix epoch = UTC+0). The recorder runs on the robot PC while the
+mocap bag records on the Mac; the files are matched purely by timestamps (the
+registration solves the clock offset). **Photo flags:** the recorder also listens on
+`/pose_events` and writes an `events` table — `panda_manual_poses.py` publishes
+`pose_reached,k` when the arm settles at pose k (photo window opens) and `pose_left,k`
+when it moves on (window closes), plus `init_reached`/`init_confirmed`/`return_start`/
+`run_end`. Keep ONE recorder running across many pose-script runs: everything lands in
+one `.db`, each run recognizable by its fresh `init_reached`. No recorder running = the
+events go nowhere, nothing breaks.
+Copy it into the mocap session folder
+(`<dataset>/phone_poses_robot/`) and pass it to the optitrack repo's registration as
+`link_robot_mocap.py ... --joints joint_states_<ts>.db` — registration then uses the
+entire continuous trajectory (thousands of time-synced FK↔mocap pairs, clock offset
+solved automatically by motion correlation) instead of still windows. See the optitrack
+repo's `RECORD_DATASET.md` for the full procedure.
+
 ## Lens calibration (`calibrate_lens.py`)
 
 The `_lens_xyz`/`_lens_axis` defaults were derived from the mount STL and can be wrong for
